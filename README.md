@@ -94,7 +94,7 @@ Anyone who learns a running party's UDP port can connect to it as a spectator: t
 engine has no access control when it hosts a replay.
 
 The server needs no game content. For each replay it downloads the matching engine
-release once (about 100 MB) and runs its dedicated server, which only streams the
+release once (about 35 MB) and runs its dedicated server, which only streams the
 recording: around 30 MB of memory and next to no CPU per running party.
 
 ## How it works

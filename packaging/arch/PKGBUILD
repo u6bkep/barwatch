@@ -5,7 +5,7 @@
 # Installing it is all the setup there is: the package's .desktop file claims
 # barwatch:// links, and pacman's desktop-database hook activates it.
 pkgname=barwatch-git
-pkgver=0.2.0
+pkgver=0.2.0.r7.g266d46b
 pkgrel=1
 pkgdesc="Watch Beyond All Reason replays together: joins a barwatch server"
 arch=('x86_64')
