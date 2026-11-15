@@ -17,3 +17,10 @@ reqwest.workspace = true
 url.workspace = true
 clap.workspace = true
 dirs = "6"
+damascene-core = "0.9"
+damascene-winit-wgpu = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

@@ -171,6 +171,25 @@ impl Link {
         }
     }
 
+    /// Like [`parse`](Self::parse), and also accepts the invite page's address
+    /// (`https://server/app/join/<id>`), which is what people paste.
+    pub fn parse_any(text: &str) -> Result<Link> {
+        let text = text.trim();
+        if !(text.starts_with("http://") || text.starts_with("https://")) {
+            return Link::parse(text);
+        }
+        let url = Url::parse(text).context("not a link")?;
+        let (prefix, session) = url
+            .path()
+            .trim_end_matches('/')
+            .rsplit_once("/app/join/")
+            .context("this is not a barwatch invite link")?;
+        ensure!(names::valid_id(session), "malformed session id");
+        let mut server = url.clone();
+        server.set_path(prefix);
+        Ok(Link::Join { server: parse_server(server.as_str())?, session: session.to_owned() })
+    }
+
     pub fn server(&self) -> &Url {
         match self {
             Link::Join { server, .. } | Link::Pair { server, .. } => server,
@@ -240,6 +259,22 @@ mod tests {
         };
         assert_eq!(Link::parse(&pair.to_string()).unwrap(), pair);
         assert_eq!(pair.server().as_str(), "http://10.0.0.5:8780/watch/");
+    }
+
+    #[test]
+    fn invite_page_addresses_are_links_too() {
+        let id = "abcdefghijklmnopqrstuv";
+        for (text, server) in [
+            (format!("https://bar.example.org/app/join/{id}"), "https://bar.example.org/"),
+            (format!(" http://10.0.0.5:8780/watch/app/join/{id}/ "), "http://10.0.0.5:8780/watch/"),
+        ] {
+            let link = Link::parse_any(&text).unwrap();
+            assert_eq!(link, Link::Join { server: Url::parse(server).unwrap(), session: id.into() });
+            assert_eq!(invite_url(link.server(), id).unwrap().as_str(), text.trim().trim_end_matches('/'));
+        }
+        assert!(Link::parse_any("https://bar.example.org/").is_err());
+        assert!(Link::parse_any("https://bar.example.org/app/join/x").is_err());
+        assert!(Link::parse_any(&format!("barwatch://join?server=https://x.org&session={id}")).is_ok());
     }
 
     #[test]
