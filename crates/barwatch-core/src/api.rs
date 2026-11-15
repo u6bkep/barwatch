@@ -123,6 +123,39 @@ pub struct SessionView {
     pub jump: Option<JumpView>,
 }
 
+/// What `GET sessions/{id}/timeline[?rev=<n>&wait=<s>]` answers: the party's
+/// statistics as far as they have been worked out. Long-polls like the session call:
+/// with `rev`, the answer waits until the view's `rev` exceeds it or `wait` runs out,
+/// and is then whatever the view is. A server older than the timeline answers 404.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimelineView {
+    /// Increases with every change of anything below. It is the server's own count
+    /// and restarts with the server: a client that sees it go down starts over.
+    pub rev: u64,
+    pub state: TimelineState,
+    /// For `Unavailable` and `Failed`: why, in words for the viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Present from `Building` on, and kept when the service is lost after that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<crate::timeline::TimelineDoc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineState {
+    /// No stats service is configured, or it cannot be reached.
+    Unavailable,
+    /// The service has the game and has not started on it.
+    Queued,
+    /// Being simulated: `doc` grows.
+    Building,
+    /// `doc` is the whole game.
+    Complete,
+    /// The service could not process the game.
+    Failed,
+}
+
 /// A jump the server issued: see [`SessionView::jump`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct JumpView {

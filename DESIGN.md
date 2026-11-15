@@ -110,8 +110,10 @@ service: everything works as today, without a timeline.
   into the timeline document below. It lives in the core crate so it is tested without a
   server, against recorded streams. Team names, sides and colours come from the replay
   barwatchd already holds (`barwatch_core::stats` reads the `AutoColors` message).
-- **Serving it**: `GET /app/v1/sessions/{id}/timeline?rev=<n>&wait=<s>` returns the
-  document, long-polling for growth. barwatchd keeps one per session in memory and
+- **Serving it**: `GET /app/v1/sessions/{id}/timeline?rev=<n>&wait=<s>` returns
+  `api::TimelineView` (`rev`, `state`: unavailable, queued, building, complete or
+  failed, a `note`, and the document once there is one), long-polling for change as
+  the session call does. barwatchd keeps one per session in memory and
   follows the stream while any viewer is connected. A party's id remains the
   capability, as for the rest of `/app/`.
 - The service being down or slow never blocks a party; the app shows "no statistics"
