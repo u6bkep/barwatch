@@ -74,7 +74,7 @@ REJECTED during design:
   (`luaui/barwidgets.lua`), unless the user switched user widgets off in BAR's own
   settings.
 - BAR's sandbox gives a user widget no LuaSocket (`socket == nil`) but does give `io`.
-  `Spring.Echo` reaches the engine output the app already captures
+  Both `Spring.Echo` and `io.stdout` reach the engine output the app already captures
   (`<data>/barwatch_engine.log`).
 - The engine has no client-side control socket. The dedicated server reports neither
   frame, pause nor speed to barwatchd and drops viewers' Lua messages in replay mode.
@@ -245,10 +245,21 @@ which is passed to the engines the app starts as `SPRING_DATADIR`. Nothing is pl
 the BAR folder, so a game started from BAR's launcher never sees it.
 
 - The widget removes itself unless `Spring.IsReplay()` or `Spring.GetSpectatingState()`.
-- It echoes `[barwatch] f=<frame> speed=<x> paused=<0|1>` once a second, and at once
-  when speed or pause changes.
-- The app follows `barwatch_engine.log`, takes the latest line, and interpolates between
-  reports using speed and pause. `Timeline::set_game` gets the result every frame.
+- It writes `[barwatch] f=<frame> speed=<x> paused=<0|1>` to the engine's standard
+  output (`io.stdout`, flushed) once a second by wall clock, and at once when speed or
+  pause changes. REJECTED after the real-window test (T2): `Spring.Echo`, which put
+  the line in every viewer's in-game console each second and into the console history
+  BAR saves in `BYAR.lua`.
+- `paused=1` also when no frame has come for 0.5 s: a pause on the server reaches a
+  spectator only as frames that stop; its own pause flag stays off (measured).
+- The app follows `barwatch_engine.log` (`position.rs`), accepts only lines that begin
+  with `[barwatch] ` (a chat line from a viewer named "barwatch" is logged with a
+  time prefix and is not taken), keeps the latest, and extrapolates from it using speed
+  and pause, at most 2 s past the report. `Timeline::set_game` gets the result every
+  frame.
+- During catch-up (joining late, after a jump) the engine's speed factor stays 1.0
+  while it runs many times faster, so the position advances in one-second steps and
+  never runs ahead of the engine.
 - No report for 5 s (user widgets switched off in BAR, engine closed): the timeline
   shows statistics and cursor without a game line, hides nothing, and still offers the
   jump button for any cursor position.
