@@ -128,7 +128,8 @@ The app's window is built with [damascene](https://github.com/computer-whisperer
   viewer's engine. Host replays from sources you would open locally. The setup text
   of an uploaded replay is parsed strictly and written out afresh before the engine
   sees it; a replay that does not fit the plain format every real one uses is refused.
-- A second invite link opens a second window rather than reusing the open one.
+- A link opened while the app is running shows up in the window that is already open,
+  but that window is not brought to the front.
 
 ## Development
 

@@ -13,6 +13,7 @@ mod config;
 mod content;
 mod datadir;
 mod fixtures;
+mod instance;
 mod mapimg;
 mod replays;
 mod ui;
@@ -94,6 +95,11 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
         return damascene_winit_wgpu::run("barwatch", viewport, ui).map_err(|e| anyhow::anyhow!("{e}"));
     }
 
+    // One window per user: a link opened while it is up goes to that window.
+    if instance::hand_over(link.as_deref()) {
+        return Ok(());
+    }
+
     let opened = link.and_then(|text| match Link::parse_any(&text) {
         Ok(link) => Some(link),
         Err(e) => {
@@ -108,7 +114,9 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
         }
     }
     let wake = backend::WakeSlot::default();
-    let ui = ui::Ui::new(backend::Backend::spawn(wake.clone()), cfg, data, opened);
+    let (backend, to_window) = backend::Backend::spawn(wake.clone());
+    let _listening = instance::listen(move |link| to_window.post(backend::Msg::Opened(link)));
+    let ui = ui::Ui::new(backend, cfg, data, opened);
     let host = damascene_winit_wgpu::HostConfig::default()
         .with_app_id("barwatch")
         .with_external_wakeup(move |wakeup| *wake.lock().unwrap() = Some(wakeup));

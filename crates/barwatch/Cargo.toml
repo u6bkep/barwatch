@@ -17,6 +17,7 @@ reqwest.workspace = true
 url.workspace = true
 clap.workspace = true
 dirs = "6"
+rand = "0.9"
 damascene-core = "0.9"
 damascene-winit-wgpu = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }

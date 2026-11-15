@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "barwatch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -564,6 +564,7 @@ dependencies = [
  "damascene-winit-wgpu",
  "dirs",
  "image",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",
@@ -574,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "barwatch-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -589,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "barwatchd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",

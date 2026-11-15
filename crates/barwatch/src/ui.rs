@@ -204,6 +204,13 @@ impl Ui {
                 self.creating = false;
                 self.toasts.push(ToastSpec::error(e));
             }
+            // A link opened while this window was up: it asks here, like one that
+            // started the app.
+            Msg::Opened(Some(text)) => match Link::parse_any(&text) {
+                Ok(link) => self.pending = Some(link),
+                Err(e) => self.toasts.push(ToastSpec::error(format!("That link could not be opened: {e:#}"))),
+            },
+            Msg::Opened(None) => self.toasts.push(ToastSpec::info("barwatch is already open.")),
         }
     }
 
@@ -352,7 +359,7 @@ impl App for Ui {
             }
             return;
         }
-        if event.is_click_or_activate("consent:no") || event.is_route("consent:dismiss") {
+        if declines_consent(&event) {
             self.pending = None;
             return;
         }
@@ -445,6 +452,13 @@ fn tab_out_of_field(event: &UiEvent) -> Option<&'static str> {
     }
     let (_, previous, next) = FIELD_NEIGHBOURS.iter().find(|(field, _, _)| event.is_route(field))?;
     Some(if press.modifiers.shift { previous } else { next })
+}
+
+/// Whether `event` turns the consent dialog down: "Not now", or a click on the backdrop.
+/// The backdrop is a hover target too, so its route alone is not enough: the pointer
+/// merely crossing the window would close the dialog before it could be answered.
+fn declines_consent(event: &UiEvent) -> bool {
+    event.is_click_or_activate("consent:no") || (event.kind == UiEventKind::Click && event.is_route("consent:dismiss"))
 }
 
 fn consent_dialog(link: &Link) -> El {
@@ -823,6 +837,19 @@ mod tests {
         assert_eq!(tab_out_of_field(&tab("join")), None);
         let enter = UiEvent::synthetic_key_down("filter", LogicalKey::Named(NamedKey::Enter));
         assert_eq!(tab_out_of_field(&enter), None);
+    }
+
+    #[test]
+    fn only_a_click_on_the_backdrop_declines() {
+        assert!(declines_consent(&UiEvent::synthetic_click("consent:dismiss")));
+        assert!(declines_consent(&UiEvent::synthetic_click("consent:no")));
+        assert!(!declines_consent(&UiEvent::synthetic_click("consent:yes")));
+        // What the pointer crossing the backdrop sends.
+        for kind in [UiEventKind::PointerEnter, UiEventKind::PointerLeave, UiEventKind::PointerDown] {
+            let mut hover = UiEvent::synthetic_click("consent:dismiss");
+            hover.kind = kind;
+            assert!(!declines_consent(&hover), "{kind:?}");
+        }
     }
 
     #[test]

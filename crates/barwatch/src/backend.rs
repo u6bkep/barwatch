@@ -42,6 +42,9 @@ pub enum Msg {
         id: String,
     },
     CreateFailed(String),
+    /// Another launch of the app handed over the link it was started with (`None`: it
+    /// had none).
+    Opened(Option<String>),
 }
 
 /// The window's wake-up handle, once the window exists.
@@ -52,14 +55,15 @@ pub struct Backend {
     messages: mpsc::Receiver<Msg>,
 }
 
+/// Posts messages to the window and wakes it.
 #[derive(Clone)]
-struct Outbox {
+pub struct Outbox {
     messages: mpsc::Sender<Msg>,
     wake: WakeSlot,
 }
 
 impl Outbox {
-    fn post(&self, msg: Msg) {
+    pub fn post(&self, msg: Msg) {
         let _ = self.messages.send(msg);
         if let Some(wakeup) = self.wake.lock().unwrap().as_ref() {
             wakeup.wake();
@@ -68,10 +72,11 @@ impl Outbox {
 }
 
 impl Backend {
-    pub fn spawn(wake: WakeSlot) -> Backend {
+    pub fn spawn(wake: WakeSlot) -> (Backend, Outbox) {
         let (commands, command_rx) = async_mpsc::unbounded_channel();
         let (message_tx, messages) = mpsc::channel();
         let outbox = Outbox { messages: message_tx, wake };
+        let to_window = outbox.clone();
         std::thread::Builder::new()
             .name("barwatch-backend".into())
             .spawn(move || {
@@ -80,7 +85,7 @@ impl Backend {
                 runtime.block_on(work(command_rx, outbox));
             })
             .expect("backend thread");
-        Backend { commands, messages }
+        (Backend { commands, messages }, to_window)
     }
 
     /// A backend that does nothing, for rendering fixed scenes.
