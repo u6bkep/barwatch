@@ -40,6 +40,19 @@ pub struct Demo {
     pub game_data: GameData,
 }
 
+/// One engine team: a player slot or an AI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamInfo {
+    /// The engine's team number, which is also its index in the replay's statistics.
+    pub team: u32,
+    pub ally_team: u32,
+    /// Who controlled it: player names, or the AI's name followed by " (AI)".
+    pub name: String,
+    pub is_ai: bool,
+    /// The faction picked in the lobby (`Armada`, `Cortex`, `Legion`, `Random`), if given.
+    pub faction: Option<String>,
+}
+
 /// Who played, grouped the way a lobby shows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Roster {
@@ -138,6 +151,33 @@ impl Demo {
             }
         }
         Roster { teams: by_ally.into_values().collect(), spectators }
+    }
+
+    /// Every team in the setup, in team order.
+    pub fn team_list(&self) -> Vec<TeamInfo> {
+        let field = |sec: &Map<String, Value>, key: &str| -> Option<u32> { sec.get(key)?.as_str()?.trim().parse().ok() };
+        self.sections("team")
+            .map(|(team, sec)| {
+                let players: Vec<&str> = self
+                    .sections("player")
+                    .filter(|(_, p)| {
+                        field(p, "team") == Some(team)
+                            && p.get("spectator").and_then(Value::as_str).is_none_or(|s| s.trim() == "0")
+                    })
+                    .filter_map(|(_, p)| p.get("name")?.as_str())
+                    .collect();
+                let ai = self.sections("ai").find(|(_, a)| field(a, "team") == Some(team)).map(|(_, a)| {
+                    a.get("name").or_else(|| a.get("shortname")).and_then(Value::as_str).unwrap_or("AI").to_owned()
+                });
+                let (name, is_ai) = match (players.is_empty(), ai) {
+                    (false, _) => (players.join(", "), false),
+                    (true, Some(ai)) => (format!("{ai} (AI)"), true),
+                    (true, None) => (format!("Team {team}"), false),
+                };
+                let faction = sec.get("side").and_then(Value::as_str).map(|s| s.trim().to_owned());
+                TeamInfo { team, ally_team: field(sec, "allyteam").unwrap_or(team), name, is_ai, faction }
+            })
+            .collect()
     }
 
     fn sections<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = (u32, &'a Map<String, Value>)> + 'a {

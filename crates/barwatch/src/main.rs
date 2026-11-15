@@ -16,6 +16,7 @@ mod fixtures;
 mod instance;
 mod mapimg;
 mod replays;
+mod timeline;
 mod ui;
 mod uri;
 
@@ -54,6 +55,26 @@ enum Cmd {
     },
     /// Show the detected data directory and installed engines.
     Info,
+    /// PROTOTYPE: open the timeline on a replay saved by a game client.
+    #[command(hide = true)]
+    Timeline {
+        replay: PathBuf,
+        /// Game time to start at, in seconds.
+        #[arg(long, default_value_t = 0.0)]
+        at: f32,
+        /// Start with the stand-in game clock paused.
+        #[arg(long)]
+        paused: bool,
+        /// Add made-up milestones, flagged as samples, to try the event lane.
+        #[arg(long)]
+        sample_markers: bool,
+        /// DEVELOPMENT: a Beyond-All-Reason checkout to read marker pictures from.
+        #[arg(long)]
+        game_art: Option<PathBuf>,
+        /// Pretend statistics are worked out only up to this game time (seconds).
+        #[arg(long)]
+        computed_to: Option<f32>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -79,6 +100,13 @@ fn main() -> Result<()> {
         Some(Cmd::Join { link, name, headless }) => {
             let name = name.unwrap_or_else(|| if cfg.name.is_empty() { datadir::default_name(&data) } else { cfg.name.clone() });
             join_in_terminal(&link, client::Settings { name, data, headless })
+        }
+        Some(Cmd::Timeline { replay, at, paused, sample_markers, game_art, computed_to }) => {
+            use damascene_core::prelude::Rect;
+            let opts = timeline::ProtoOptions { start_s: at, sample_markers, game_art, computed_to, paused };
+            let proto = timeline::Proto::open(&replay, opts)?;
+            damascene_winit_wgpu::run("barwatch timeline (prototype)", Rect::new(0.0, 0.0, 1180.0, 900.0), proto)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         None => run_window(cfg, data, cli.link),
     }
