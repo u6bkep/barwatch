@@ -63,6 +63,7 @@ pub fn scene(name: &str) -> Option<Ui> {
         stage,
         name: "Sorrel".into(),
         notice: None,
+        position: None,
     };
     match name {
         "empty" => {}
