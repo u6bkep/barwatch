@@ -125,7 +125,8 @@ pub(super) fn values(source: Source, get: impl Fn(&str) -> Option<f64>) -> Vec<(
     // A share of a whole, as BAR's panel shows it; a share of nothing is none.
     let ratio = |part: &str, whole: &str| -> Option<f64> {
         let (p, w) = (get(part)?, get(whole)?);
-        Some(if w > 0.0 { p / w } else { 0.0 })
+        let r = if w > 0.0 { p / w } else { 0.0 };
+        r.is_finite().then_some(r)
     };
     let derived: &[(Metric, &str, &str)] = match source {
         Source::TeamStats => &[],

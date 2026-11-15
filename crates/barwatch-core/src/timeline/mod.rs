@@ -5,7 +5,9 @@
 //! takes bytes and keeps an unfinished last line for the next call. The document
 //! ([`TimelineBuilder::document`]) is a pure function of the lines fed so far, so
 //! how they were split makes no difference, `rev` included: it counts the lines
-//! that changed the document. Lines it does not use are skipped, `_cursor` lines
+//! that changed the document, plus one for [`TimelineBuilder::finish`] when no
+//! `_cursor` had said the stream was complete. After a broken connection call
+//! [`TimelineBuilder::connection_lost`] before feeding the resumed stream. Lines it does not use are skipped, `_cursor` lines
 //! move `frames` on and end the stream, and nothing a line says can make it panic
 //! or hold more than the game's size in memory (see the limits below).
 //!
@@ -22,7 +24,9 @@
 //!   end nothing changes any more, so the next slot's value is that one.
 //!
 //! A later record for a slot replaces an earlier one. A slot a series skipped is
-//! filled with the value before it (0 at the start). A series is as long as the
+//! filled with the value before it (0 at the start); a record that arrives later
+//! for an earlier slot does not redo those fills (no real stream sends a source
+//! out of frame order). A series is as long as the
 //! data it has had, so lengths differ between metrics and teams while the stream
 //! runs; a metric is listed in `metrics` once it has a value.
 //!
@@ -269,6 +273,14 @@ impl TimelineBuilder {
         } else {
             self.line(line.as_bytes());
         }
+    }
+
+    /// The connection broke: forgets an unfinished last line, so that the first
+    /// line of a resumed stream (`from=<last cursor's next>`) is read on its own.
+    /// Everything already applied stays; lines sent again change nothing.
+    pub fn connection_lost(&mut self) {
+        self.partial.clear();
+        self.overlong = false;
     }
 
     /// The input is over and was the whole game: reads an unfinished last line and

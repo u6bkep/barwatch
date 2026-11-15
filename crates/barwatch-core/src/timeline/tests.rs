@@ -693,3 +693,29 @@ fn every_milestone_key_is_one_the_app_knows() {
         assert_eq!(Milestone::from_key(m.key()), Some(m));
     }
 }
+
+#[test]
+fn a_resumed_stream_reads_its_first_line_after_a_broken_one() {
+    let died = line(json!({"action": "team_died", "frame": 5, "teamID": 1}));
+    let mut b = builder();
+    b.feed(format!("{}\n", cursor(10, 0, false)).as_bytes());
+    // The connection breaks halfway through a line ...
+    b.feed(&died.as_bytes()[..20]);
+    b.connection_lost();
+    // ... and the resumed stream sends it again from the cursor.
+    b.feed(format!("{died}\n").as_bytes());
+    assert_eq!(kinds(&b.document()), vec![(1, "teamDied", None)]);
+    assert_eq!(b.stats().malformed, 0);
+}
+
+#[test]
+fn a_ratio_that_overflows_is_left_out() {
+    let d = doc_of(&[line(json!({
+        "action": "bs_team_resources", "frame": 0, "teamID": 0, "metalCurrent": 1e300, "metalStorage": 1e-300,
+        "metalIncome": 1
+    }))]);
+    assert!(!d.series.contains_key("metalLevel"));
+    assert_eq!(d.series["metalIncome"][0], vec![1.0]);
+    let text = serde_json::to_string(&d).unwrap();
+    assert_eq!(serde_json::from_str::<TimelineDoc>(&text).unwrap(), d);
+}
