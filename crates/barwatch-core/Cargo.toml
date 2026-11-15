@@ -17,3 +17,7 @@ futures-util.workspace = true
 url.workspace = true
 flate2 = "1"
 sevenz-rust2 = "0.25"
+
+[dev-dependencies]
+# Reads the stats service's stored output (`.jsonl.zst`) in the timeline example.
+ruzstd = "0.8"
