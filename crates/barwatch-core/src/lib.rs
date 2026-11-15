@@ -6,6 +6,7 @@ pub mod demo;
 pub mod engine;
 pub mod maps;
 pub mod names;
+pub mod rapid;
 pub mod script;
 pub mod stats;
 

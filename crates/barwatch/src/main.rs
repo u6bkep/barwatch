@@ -68,7 +68,8 @@ enum Cmd {
         /// Add made-up milestones, flagged as samples, to try the event lane.
         #[arg(long)]
         sample_markers: bool,
-        /// DEVELOPMENT: a Beyond-All-Reason checkout to read marker pictures from.
+        /// DEVELOPMENT: a Beyond-All-Reason checkout to read marker pictures from,
+        /// instead of the replay's game version installed in the data directory.
         #[arg(long)]
         game_art: Option<PathBuf>,
         /// Pretend statistics are worked out only up to this game time (seconds).
@@ -103,7 +104,8 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Timeline { replay, at, paused, sample_markers, game_art, computed_to }) => {
             use damascene_core::prelude::Rect;
-            let opts = timeline::ProtoOptions { start_s: at, sample_markers, game_art, computed_to, paused };
+            let opts =
+                timeline::ProtoOptions { start_s: at, sample_markers, data_root: data.root, game_art, computed_to, paused };
             let proto = timeline::Proto::open(&replay, opts)?;
             damascene_winit_wgpu::run("barwatch timeline (prototype)", Rect::new(0.0, 0.0, 1180.0, 900.0), proto)
                 .map_err(|e| anyhow::anyhow!("{e}"))

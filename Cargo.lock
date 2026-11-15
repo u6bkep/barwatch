@@ -578,6 +578,7 @@ name = "barwatch-core"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "flate2",
  "futures-util",
  "reqwest",
