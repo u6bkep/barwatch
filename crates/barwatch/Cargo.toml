@@ -19,7 +19,7 @@ clap.workspace = true
 dirs = "6"
 rand = "0.9"
 damascene-core = "0.9"
-damascene-winit-wgpu = "0.9"
+barwatch-host.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

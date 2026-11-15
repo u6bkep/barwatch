@@ -558,10 +558,10 @@ dependencies = [
  "anyhow",
  "arboard",
  "barwatch-core",
+ "barwatch-host",
  "chrono",
  "clap",
  "damascene-core",
- "damascene-winit-wgpu",
  "dirs",
  "image",
  "rand 0.9.5",
@@ -586,6 +586,35 @@ dependencies = [
  "sevenz-rust2",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "barwatch-host"
+version = "0.2.1"
+dependencies = [
+ "accesskit_android",
+ "accesskit_winit",
+ "arboard",
+ "block2 0.5.1",
+ "damascene-core",
+ "damascene-wgpu",
+ "damascene-winit",
+ "dlib",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.5.3",
+ "objc2-foundation 0.2.2",
+ "objc2-ui-kit",
+ "open",
+ "png",
+ "pollster",
+ "raw-window-handle",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-sys",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -1077,6 +1106,7 @@ dependencies = [
  "roxmltree 0.21.2",
  "rustc-hash 2.1.3",
  "swash",
+ "tracing",
  "ttf-parser",
  "unicode-segmentation",
  "usvg",
@@ -1092,6 +1122,7 @@ dependencies = [
  "damascene-fonts-emoji",
  "damascene-fonts-inter",
  "damascene-fonts-jetbrains-mono",
+ "damascene-fonts-roboto",
  "damascene-fonts-symbols",
 ]
 
@@ -1112,6 +1143,12 @@ name = "damascene-fonts-jetbrains-mono"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfd4c719004dc049baa73e4e869cca40c02532f5327ac118b3bb4fcc43a57cdc"
+
+[[package]]
+name = "damascene-fonts-roboto"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3349861f3c89e5cd89cf66b07a13b3ee750760a32e2e4943d2283a31c068874"
 
 [[package]]
 name = "damascene-fonts-symbols"
@@ -1141,37 +1178,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0220d84b2d3710c56de6a0a6b971a645b4c43fab7a54f9b84ce683b66005a3fa"
 dependencies = [
  "damascene-core",
- "winit",
-]
-
-[[package]]
-name = "damascene-winit-wgpu"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c59b3feccb300a9beacd327e30762d1c8cf52eace221897097ca37ddc46a5888"
-dependencies = [
- "accesskit_android",
- "accesskit_winit",
- "arboard",
- "block2 0.5.1",
- "damascene-core",
- "damascene-wgpu",
- "damascene-winit",
- "dlib",
- "jni 0.22.4",
- "log",
- "objc2 0.5.3",
- "objc2-foundation 0.2.2",
- "objc2-ui-kit",
- "open",
- "png",
- "pollster",
- "raw-window-handle",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
- "wayland-sys",
- "wgpu",
  "winit",
 ]
 

@@ -432,6 +432,11 @@ impl App for Ui {
     }
 }
 
+/// The window host's own hooks. The party view has nothing that follows the
+/// pointer yet, so the pointer hook stays the default no-op; the timeline will
+/// take it when it is embedded here (DESIGN.md §5.7).
+impl barwatch_host::WinitWgpuApp for Ui {}
+
 /// A focused text field receives Tab as a raw key instead of giving up focus, so
 /// the fields hand focus to their neighbours here: (field, previous, next).
 const FIELD_NEIGHBOURS: [(&str, &str, &str); 4] = [

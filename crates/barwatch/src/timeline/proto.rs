@@ -102,3 +102,6 @@ impl App for Proto {
         shaders()
     }
 }
+
+/// The window host's own hooks; the pointer hook stays the default no-op here.
+impl barwatch_host::WinitWgpuApp for Proto {}
