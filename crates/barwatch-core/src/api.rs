@@ -10,7 +10,9 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-/// Bumped when the app and daemon stop understanding each other.
+/// Bumped when the app and daemon stop understanding each other. The app refuses a
+/// server with another number, so additions an older side can ignore (optional
+/// fields, new calls) do not bump it.
 pub const API_VERSION: u32 = 1;
 pub const APP_PREFIX: &str = "/app/v1";
 
@@ -110,6 +112,24 @@ pub struct SessionView {
     /// The current run has played the replay to its end.
     pub ended: bool,
     pub viewers: Vec<ViewerView>,
+    /// The game's id at the stats service (the replay's own 16-byte id, in hex), once
+    /// the server has one. Absent from servers without a stats service or older than
+    /// the timeline; apps older than it ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    /// The last jump the server issued in this run, so every viewer's app can show it
+    /// while its own engine is still on the way. Cleared by a new run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<JumpView>,
+}
+
+/// A jump the server issued: see [`SessionView::jump`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct JumpView {
+    /// Game time jumped to, in seconds.
+    pub target_s: u32,
+    /// When the server issued it.
+    pub at_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -180,7 +180,10 @@ reads the file from there) with the existing expiry.
 - `jump: {target_s, at_unix}`: the last jump barwatchd issued in this run, so every
   viewer's app can show a jump in flight. Cleared on a new run.
 
-`API_VERSION` goes up by one. `Control::Skip` is unchanged.
+`API_VERSION` stays 1 (CORRECTED 2026-11-15: the first draft bumped it, but the app
+refuses a server whose number differs, which would lock released apps out for an
+addition they can ignore). `Control::Skip` is unchanged. The fields and `JumpView`
+exist in `barwatch-core::api`; barwatchd fills them in T4b.
 
 ### 4.4 Web page
 

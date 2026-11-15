@@ -40,6 +40,8 @@ fn session(phase: Phase, viewers: Vec<ViewerView>) -> SessionView {
         speed: 1.0,
         ended: false,
         viewers,
+        game_id: None,
+        jump: None,
     }
 }
 

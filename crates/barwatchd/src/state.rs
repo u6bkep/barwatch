@@ -356,6 +356,8 @@ impl Session {
             speed: st.speed,
             ended: st.ended,
             viewers,
+            game_id: None,
+            jump: None,
         }
     }
 
