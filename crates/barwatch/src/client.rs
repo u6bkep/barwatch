@@ -446,7 +446,7 @@ async fn provision(
         progress(format!("Checking game version {}", short_game(&replay.game)), None);
         content::ensure_game(&dir, &data.root, &replay.game).await?;
         progress(format!("Checking map {}", replay.map), None);
-        content::ensure_map(&dir, &data.root, &replay.map).await?;
+        content::ensure_map(&http, &dir, &data.root, &replay.map).await?;
         Ok(dir)
     }
     .await;
