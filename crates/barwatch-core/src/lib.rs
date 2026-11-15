@@ -9,6 +9,7 @@ pub mod names;
 pub mod rapid;
 pub mod script;
 pub mod stats;
+pub mod timeline;
 
 /// `User-Agent` for every outgoing request: names the tool, nothing about the user.
 pub const USER_AGENT: &str = concat!("barwatch/", env!("CARGO_PKG_VERSION"));
