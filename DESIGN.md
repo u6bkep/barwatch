@@ -101,9 +101,11 @@ service: everything works as today, without a timeline.
   with the game id for a link or id. It stores the returned `game_id` with the session.
 - **Reading the extraction**: barwatchd follows the service's record stream
   (`GET /api/v1/games/{game_id}/records?actions=…&from=…&follow=1`, bar-replays DESIGN
-  §9.8), asking only for the record types it uses: `team_stats`, `extra_stat_update`,
-  `bs_team_resources`, `unit_def`, `bs_unit_def`, `unit_finished`, `unit_killed`,
-  `team_died`. It resumes from the last `_cursor` after a drop.
+  §9.8), asking only for the record types it uses, which the builder exports as
+  `timeline::ACTIONS`: `team_stats`, `bs_team_stats`, `extra_stat_update`,
+  `bs_team_resources`, `unit_def`, `bs_unit_def`, `unit_created`, `unit_finished`,
+  `unit_killed`, `team_died`. (`unit_finished` carries no unit type; it is joined to
+  `unit_created`.) It resumes from the last `_cursor` after a drop.
 - **Building the timeline**: a streaming reducer in `barwatch-core` turns those records
   into the timeline document below. It lives in the core crate so it is tested without a
   server, against recorded streams. Team names, sides and colours come from the replay
@@ -131,15 +133,27 @@ The timeline document is barwatch's own format and may change with the screen:
   (counter since the start; the app derives rates) or `level` (value at that moment).
 - Metric keys reuse the names of BAR's TeamStats panel where the meaning is the same
   (`luaui/Include/teamstats_model.lua`):
-  - from `team_stats`: `metalProduced`, `energyProduced`, `metalUsed`, `energyUsed`,
-    `metalExcess`, `energyExcess`, `damageDealt`, `damageReceived`, `unitsProduced`,
-    `unitsDied`, `unitsKilled`, plus the sent/received/captured counters;
+  - the engine's counters: `metalProduced`, `energyProduced`, `metalUsed`,
+    `energyUsed`, `metalExcess`, `energyExcess`, `damageDealt`, `damageReceived`,
+    `unitsProduced`, `unitsDied`, `unitsKilled`, plus the sent/received/captured
+    counters. Gex writes every `team_stats` record in one batch at game over, so
+    during a simulation these come from the companion's periodic `bs_team_stats`
+    (same key names; bar-replays DESIGN §9.7). For games extracted before the
+    companion existed they appear only when the stream completes.
   - from `extra_stat_update`: `unitValue` (totalValue), `valueArmy`, `valueDefense`,
-    `valueUtility`, `valueEconomy`, `metalLevel`, `energyLevel`, `buildPower`,
-    `buildPowerUse`, `actions`;
+    `valueUtility`, `valueEconomy`, `metalStored` (metalCurrent), `energyStored`,
+    `buildPower` (available), `buildPowerUse` (used / available, 0 to 1), `actions`.
+    The `value*` keys carry BAR's names but Gex's classification (metal only; air and
+    sea count as army; no factory or builder class): not comparable with BAR's panel.
   - from `bs_team_resources` (absent for games extracted before the companion widget
-    existed): `metalIncome`, `metalExpense`, `metalStored`, `energyIncome`,
-    `energyExpense`, `energyStored`.
+    existed): `metalIncome`, `metalExpense`, `energyIncome`, `energyExpense`, and
+    `metalLevel`, `energyLevel` (current / storage, 0 to 1, as in BAR's panel).
+  - CORRECTED 2026-11-15 (found by the builder's implementation): the first draft
+    mapped `metalLevel` and `buildPowerUse` to absolute amounts and took `metalStored`
+    from the companion; BAR's panel uses those keys for ratios and the current amount.
+- A record stamped up to 2 frames after a multiple of `period_frames` belongs to that
+  sample; anything else to the next one. The last sample can therefore lie past
+  `frames`: take the game's length from `frames`, not from a series' length.
 - Marks use BAR's milestone keys, which `MarkKind::from_key` already knows: `tech2`,
   `tech3`, `nuke`, `antinuke`, `lrpc`, `commanderLost`, `commanderKill`, `firstKill`,
   `firstLoss`, `moho`, `converter`, `advConverter`, `fusion`, `afus`, `geo`, `radar`,

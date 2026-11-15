@@ -31,8 +31,9 @@
 //! runs; a metric is listed in `metrics` once it has a value.
 //!
 //! The engine's own counters (`team_stats`) are written by Gex only at game over,
-//! all at once: until then a stream has only Gex's tally and the companion's
-//! resources.
+//! all at once. The companion writes the newest history entry every period as
+//! `bs_team_stats`, which is read the same way; without it a stream has only Gex's
+//! tally and the companion's resources until the game is over.
 //!
 //! # Marks
 //!
@@ -69,6 +70,7 @@ pub const SNAP_FRAMES: u32 = 2;
 /// The record types the builder uses, for the stream's `actions=` parameter.
 pub const ACTIONS: &[&str] = &[
     "team_stats",
+    "bs_team_stats",
     "extra_stat_update",
     "bs_team_resources",
     "unit_def",

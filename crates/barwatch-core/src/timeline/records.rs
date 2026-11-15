@@ -44,7 +44,9 @@ pub(super) fn read(v: &Value) -> Option<Record> {
     }
     Some(match action {
         "_cursor" => Record::Cursor { frame, complete: o.get("complete").and_then(Value::as_bool).unwrap_or(false) },
-        "team_stats" => sample(o, frame?, Source::TeamStats)?,
+        // The companion's periodic copy of the same history entries, with the same
+        // keys and the entry's own frame: it gives the counters during a simulation.
+        "team_stats" | "bs_team_stats" => sample(o, frame?, Source::TeamStats)?,
         "extra_stat_update" => sample(o, frame?, Source::ExtraStatUpdate)?,
         "bs_team_resources" => sample(o, frame?, Source::BsTeamResources)?,
         "unit_def" => Record::UnitDef { def: int(o, "defID")?, name: name(o, "defName"), facts: gex_def(o) },

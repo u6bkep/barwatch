@@ -352,6 +352,23 @@ fn companion_resources_give_their_series() {
     assert!(d.metrics.iter().all(|m| m.kind == MetricKind::Level));
 }
 
+/// The companion's periodic counters fill the series while the game runs, and
+/// Gex's batch at game over, which repeats them, changes nothing.
+#[test]
+fn companion_counters_arrive_during_the_game_and_the_final_batch_agrees() {
+    let periodic = |frame: u32, produced: f64| team_stats(frame, 0, produced).replace("\"team_stats\"", "\"bs_team_stats\"");
+    assert!(periodic(0, 0.0).contains("bs_team_stats"));
+    let mut b = builder();
+    feed_lines(&mut b, &[periodic(0, 0.0), periodic(450, 900.0), periodic(900, 1900.0)]);
+    assert_eq!(b.document().series["metalProduced"][0], vec![0.0, 900.0, 1900.0]);
+    let rev = b.rev();
+    feed_lines(&mut b, &[team_stats(0, 0, 0.0), team_stats(450, 0, 900.0), team_stats(900, 0, 1900.0)]);
+    assert_eq!(b.rev(), rev);
+    feed_lines(&mut b, &[team_stats(1201, 0, 2500.0)]);
+    assert_eq!(b.document().series["metalProduced"][0], vec![0.0, 900.0, 1900.0, 2500.0]);
+    assert!(ACTIONS.contains(&"bs_team_stats"));
+}
+
 /// The marks one finished unit of a definition makes for team 0.
 fn built_marks(gex: Value, bs: Option<Value>) -> Vec<String> {
     let mut lines = vec![udef(7, "thing", gex)];
