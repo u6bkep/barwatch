@@ -321,7 +321,8 @@ pub trait WinitWgpuApp: App {
     /// `UiEvent::pointer`), and with `None` when the pointer leaves the
     /// window. It runs after the events the move itself caused
     /// (`PointerEnter`, `PointerLeave`, `Drag`) were delivered. Return
-    /// `true` to have a frame drawn.
+    /// `true` to have a frame built and drawn (`App::build` runs; such a
+    /// frame is never downgraded to a paint-only one).
     ///
     /// Upstream tells an app about the pointer only when the hovered
     /// element changes; a readout that follows the pointer inside one
@@ -732,6 +733,7 @@ fn run_host_on_event_loop<A: WinitWgpuApp + 'static>(
         next_layout_redraw: None,
         next_paint_redraw: None,
         next_trigger: FrameTrigger::Initial,
+        app_wants_build: false,
         last_frame_at: None,
         last_build: Duration::ZERO,
         last_prepare: Duration::ZERO,
@@ -854,6 +856,12 @@ struct Host<A: WinitWgpuApp> {
     /// consumes it and resets to `Other`. Drives [`HostDiagnostics::trigger`]
     /// for apps that surface a debug overlay.
     next_trigger: FrameTrigger,
+    /// barwatch: the app's pointer hook asked for a frame that has not been
+    /// built yet. `next_trigger` alone cannot carry that: a time-driven
+    /// shader's paint deadline expiring in the same loop turn overwrites a
+    /// `Pointer` trigger with `ShaderPaint`, and a paint-only frame runs no
+    /// `build`, so what the app wanted drawn would never appear.
+    app_wants_build: bool,
     /// Wall clock at the start of the previous redraw. Diff with the
     /// next frame's start gives `last_frame_dt`.
     last_frame_at: Option<Instant>,
@@ -1820,6 +1828,7 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
                             Some((lx, ly)),
                             &event_cx(gfx, self.last_diagnostics.as_ref()),
                         );
+                        self.app_wants_build |= wanted;
                         if moved.needs_redraw || wanted {
                             self.next_trigger = FrameTrigger::Pointer;
                             gfx.window.request_redraw();
@@ -1838,9 +1847,11 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
                                 &mut self.last_primary,
                             );
                         }
-                        // barwatch: the pointer is gone. The frame below is
-                        // drawn whatever the app answers, as upstream does.
-                        self.app
+                        // barwatch: the pointer is gone. A frame is drawn
+                        // whatever the app answers, as upstream does; its
+                        // answer decides whether that frame must be built.
+                        self.app_wants_build |= self
+                            .app
                             .pointer_moved(None, &event_cx(gfx, self.last_diagnostics.as_ref()));
                         self.next_trigger = FrameTrigger::Pointer;
                         gfx.window.request_redraw();
@@ -2396,9 +2407,14 @@ impl<A: WinitWgpuApp> ApplicationHandler for Host<A> {
                         let keyboard_dirty = self.keyboard.as_ref().is_some_and(|k| k.take_dirty());
                         #[cfg(not(target_os = "ios"))]
                         let keyboard_dirty = false;
+                        // barwatch: nor when the app's pointer hook asked for
+                        // a frame: that one is built, whatever the trigger
+                        // was overwritten with since.
+                        let app_wants_build = std::mem::take(&mut self.app_wants_build);
                         let paint_only = trigger == FrameTrigger::ShaderPaint
                             && self.pending_resize.is_none()
-                            && !keyboard_dirty;
+                            && !keyboard_dirty
+                            && !app_wants_build;
 
                         let (prepare, palette, t_after_build, t_after_prepare) = if paint_only {
                             damascene_core::profile_span!("frame::repaint");

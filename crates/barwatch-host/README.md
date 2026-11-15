@@ -17,7 +17,10 @@ and `damascene-winit` stay unmodified crates.io dependencies.
 - **`WinitWgpuApp::pointer_moved(position, cx) -> bool`** (new, default no-op).
   The host calls it on every `CursorMoved` with the pointer's position in
   logical pixels, and with `None` on `CursorLeft`; when it returns `true` the
-  host draws a frame. Upstream keeps the position to itself and tells an app
+  host builds and draws a frame. That frame is not downgraded to a paint-only
+  one (upstream's loop lets a time-driven shader's paint deadline overwrite a
+  pointer-triggered frame in the same turn, which would skip `App::build`): the
+  host field `app_wants_build` carries the request to the redraw. Upstream keeps the position to itself and tells an app
   only when the hovered element changes, which is not enough for a hover line
   that follows the pointer inside one element. An app opts in by implementing
   `WinitWgpuApp` and starting through `run_host_app` /

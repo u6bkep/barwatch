@@ -74,7 +74,8 @@ const JUMP_TOLERANCE_S: f32 = 2.0;
 const JUMP_GIVE_UP: Duration = Duration::from_secs(90);
 /// A jump shorter than this is not worth interrupting everyone for.
 const MIN_JUMP_S: f32 = 10.0;
-/// The readout beside the hover line: its width, and how far it stands off the line.
+/// The readout beside the hover line: its width where there is room, and how
+/// far it stands off the line.
 const READOUT_W: f32 = 236.0;
 const READOUT_GAP: f32 = 14.0;
 /// The most lines of values a hover readout lists.
@@ -117,13 +118,16 @@ impl Chip {
     /// [`Place::Tag`] flips it.
     fn span(&self, w: f32) -> (f32, f32) {
         let x = self.at * w;
-        match self.anchor {
-            Anchor::Center => (x - self.width / 2.0, x + self.width / 2.0),
-            Anchor::After if x + self.width > w => (x - self.width, x),
-            Anchor::After => (x, x + self.width),
-            Anchor::Before if x - self.width < 0.0 => (x, x + self.width),
-            Anchor::Before => (x - self.width, x),
-        }
+        let from = match self.anchor {
+            Anchor::Center => x - self.width / 2.0,
+            Anchor::After if x + self.width > w => x - self.width,
+            Anchor::After => x,
+            Anchor::Before if x - self.width < 0.0 => x,
+            Anchor::Before => x - self.width,
+        };
+        // ... and kept inside the axis, as every tag is.
+        let from = from.clamp(0.0, (w - self.width).max(0.0));
+        (from, from + self.width)
     }
 }
 
@@ -134,9 +138,11 @@ enum Track {
     Events,
     Lead,
     Hero,
-    /// The space above the large chart and the line above the rows: on the
-    /// axis like the rest, with nothing of their own to read.
+    /// The space above the large chart: on the axis like the rest, with
+    /// nothing of its own to read.
     Gap,
+    /// The line above the rows; the same.
+    ListHead,
     Row(usize),
 }
 
@@ -148,7 +154,8 @@ impl Track {
             "events" => Some(Track::Events),
             "lead" => Some(Track::Lead),
             "hero" => Some(Track::Hero),
-            "gap" | "list" => Some(Track::Gap),
+            "gap" => Some(Track::Gap),
+            "list" => Some(Track::ListHead),
             row => row.strip_prefix("row")?.parse().ok().map(Track::Row),
         }
     }
@@ -289,6 +296,12 @@ impl Timeline {
             return false;
         }
         self.pointer = position;
+        // A press that leaves the window is dropped by the library without a
+        // release event (where the system reports the leave at once): do not
+        // wait for one.
+        if position.is_none() {
+            self.pressed = false;
+        }
         let shown = self.shown.get();
         let tracks = cx.rect_of_key(&Self::area_key("ruler")).map(|r| Rect::new(r.x, r.y, r.w, shown.tracks_h));
         let over = position.is_some_and(|(x, y)| tracks.is_some_and(|r| r.contains(x, y)));
@@ -306,7 +319,7 @@ impl Timeline {
             return Vec::new();
         }
         let options = self.data.metrics.iter().enumerate().map(|(m, s)| (m, s.def.about));
-        vec![select::select_menu_selected(KEY_METRIC, options, &self.hero)]
+        vec![select::select_menu_selected(KEY_METRIC, options, &self.hero())]
     }
 
     pub fn set_icons(&mut self, icons: Icons) {
@@ -409,6 +422,12 @@ impl Timeline {
         horizon(self.game_s, self.data.duration_s, self.hide_future)
     }
 
+    /// The metric of the large chart. Checked against the data, which a host
+    /// may replace with one that has fewer metrics (never none).
+    fn hero(&self) -> usize {
+        self.hero.min(self.data.metrics.len().saturating_sub(1))
+    }
+
     /// The player picked out, while the view is by player. Checked against
     /// the data, which a host may replace under a selection.
     fn picked(&self) -> Option<usize> {
@@ -469,6 +488,8 @@ impl Timeline {
 
     pub fn on_event(&mut self, event: &UiEvent, cx: &EventCx) -> Option<Action> {
         let route = event.route().unwrap_or_default().to_owned();
+        // The list of metrics hangs from the large chart: gone with it.
+        self.metric_open &= self.shown.get().hero;
         // Escape at the window, or on one of ours; not one meant for another widget.
         // It closes the list of metrics first, if that is open.
         if event.kind == UiEventKind::Escape && (route.is_empty() || route.starts_with("tl:")) {
@@ -584,6 +605,9 @@ impl Timeline {
         let hover = self.hover_at(cx.hovered_key(), cx.rect_of_key(&Self::area_key("ruler")), h.value);
         #[cfg(test)]
         let hover = self.forced_hover.or(hover);
+        // The key under the pointer is last frame's: a window just made short
+        // may still name a track that is no longer drawn.
+        let hover = hover.filter(|h| !compact || matches!(h.track, Track::Ruler | Track::Events | Track::Lead));
         Frame { end_s: h.value, w, gutter, compact, narrow, now, hover, hovered: cx.hovered_key().map(str::to_owned) }
     }
 
@@ -625,6 +649,7 @@ impl Timeline {
             Track::Lead => (RULER_H + lanes, LEAD_H),
             Track::Gap => (hero_top - HERO_GAP_H, HERO_GAP_H),
             Track::Hero => (hero_top, self.hero_height()),
+            Track::ListHead => (hero_top + self.hero_height(), LIST_HEAD_H),
             Track::Row(m) => (hero_top + self.hero_height() + LIST_HEAD_H + m as f32 * ROW_H, ROW_H),
         }
     }
@@ -1024,9 +1049,9 @@ impl Timeline {
     fn hero_series(&self) -> Vec<(Option<usize>, String, Color, Vec<f32>)> {
         let d = &self.data;
         if self.per_player {
-            d.teams.iter().enumerate().map(|(t, team)| (Some(t), team.name.clone(), team.color, d.team_values(self.hero, t).to_vec())).collect()
+            d.teams.iter().enumerate().map(|(t, team)| (Some(t), team.name.clone(), team.color, d.team_values(self.hero(), t).to_vec())).collect()
         } else {
-            d.sides.iter().enumerate().map(|(s, side)| (None, side.name.clone(), side.color, d.side_values(self.hero, s))).collect()
+            d.sides.iter().enumerate().map(|(s, side)| (None, side.name.clone(), side.color, d.side_values(self.hero(), s))).collect()
         }
     }
 
@@ -1050,12 +1075,12 @@ impl Timeline {
     fn hero_chart(&self, f: &Frame) -> El {
         let d = &self.data;
         let h = self.hero_height();
-        let def = d.metrics[self.hero].def;
+        let def = d.metrics[self.hero()].def;
         let series = self.hero_series();
         let shown = self.drawable_samples();
         let played = self.played_samples();
         let peak = series.iter().flat_map(|s| s.3[..shown].iter().copied()).fold(0.0f32, f32::max);
-        let (top, settled_top) = self.eased_top(f, self.hero, true, peak);
+        let (top, settled_top) = self.eased_top(f, self.hero(), true, peak);
         let (pad_top, pad_bottom) = (14.0, 4.0);
         let y = |v: f32| pad_top + (1.0 - v / top).clamp(-0.05, 1.0) * (h - pad_top - pad_bottom);
         let x = |i: usize| self.x_of(f, i);
@@ -1146,7 +1171,7 @@ impl Timeline {
             return;
         }
         let i = d.sample_index(at);
-        let def = d.metrics[self.hero].def;
+        let def = d.metrics[self.hero()].def;
         let picked = self.picked();
         let mut marks: Vec<(f32, Color, String)> = series
             .iter()
@@ -1335,7 +1360,7 @@ impl Timeline {
         }
         let area = placed(Some(h), 0.0, items).key(Self::area_key(&format!("row{m}"))).cursor(Cursor::Pointer).clip();
 
-        let selected = m == self.hero;
+        let selected = m == self.hero();
         let key = format!("{KEY_ROW}:{m}");
         let hot = f.is_hovered(&key);
         let mut cells = vec![
@@ -1440,10 +1465,12 @@ impl Timeline {
             items.push((Place::Line { at: frac(c, f.end_s), w: 12.0, top: RULER_H - 4.0, bottom: 0.0 }, paint::glow_line(cursor_color(), 2.0, 3.0, 0.12, 0.0)));
         }
         self.position_chips(f, &mut items);
-        if let Some((hv, (el, h))) = f.hover.and_then(|hv| Some((hv, self.hover_readout(hv)?))) {
+        // No wider than half the axis, so that one side of the line always has room for it.
+        let wide = READOUT_W.min((f.w / 2.0 - READOUT_GAP).max(140.0));
+        if let Some((hv, (el, h))) = f.hover.and_then(|hv| Some((hv, self.hover_readout(f, hv, wide)?))) {
             let x = frac(hv.t, f.end_s) * f.w;
             // Beside the line, on the side with room, level with the pointer.
-            let left = x + READOUT_GAP + READOUT_W > f.w;
+            let left = x + READOUT_GAP + wide > f.w;
             let pad = if left { Sides { right: READOUT_GAP, ..Sides::zero() } } else { Sides { left: READOUT_GAP, ..Sides::zero() } };
             // Level with the pointer on the large chart; under a low track
             // (over it at the bottom), so the track's own line stays in view.
@@ -1457,7 +1484,7 @@ impl Timeline {
             };
             let top = top.min(height - h - 2.0).max(RULER_H + 2.0);
             items.push((
-                Place::Tag { at: frac(hv.t, f.end_s), w: Some(READOUT_W + READOUT_GAP), h, top, anchor: if left { Anchor::Before } else { Anchor::After } },
+                Place::Tag { at: frac(hv.t, f.end_s), w: Some(wide + READOUT_GAP), h, top, anchor: if left { Anchor::Before } else { Anchor::After } },
                 row([el]).padding(pad),
             ));
         }
@@ -1467,20 +1494,20 @@ impl Timeline {
     /// The readout beside the hover line: the moment, what the track under
     /// the pointer shows, and its values there. With its height, px. Tracks
     /// without numbers (the ruler, the events) have none.
-    fn hover_readout(&self, hv: Hover) -> Option<(El, f32)> {
+    fn hover_readout(&self, f: &Frame, hv: Hover, wide: f32) -> Option<(El, f32)> {
         let d = &self.data;
         let i = d.sample_index(hv.t);
         let picked = self.picked();
         let mut note = None;
         let line = |color: Color, name: &str, value: String, v: f32, picked: bool| ReadoutLine { color, name: name.to_owned(), value, v, picked };
         let (title, mut lines): (&str, Vec<ReadoutLine>) = match hv.track {
-            Track::Ruler | Track::Events | Track::Gap => return None,
+            Track::Ruler | Track::Events | Track::Gap | Track::ListHead => return None,
             Track::Lead => (
                 "Share of metal income",
                 d.sides.iter().enumerate().map(|(s, side)| line(side.color, &side.name, format!("{:.0}%", d.shares[s][i] * 100.0), d.shares[s][i], false)).collect(),
             ),
             Track::Hero => {
-                let def = d.metrics[self.hero].def;
+                let def = d.metrics[self.hero()].def;
                 let series = self.hero_series();
                 (def.about, series.iter().map(|(team, name, color, v)| line(*color, name, def.show(v[i]), v[i], team.is_some() && *team == picked)).collect())
             }
@@ -1506,7 +1533,9 @@ impl Timeline {
                 (def.about, lines)
             }
         };
-        if let Some(more) = shortlist(&mut lines, READOUT_ROOM, |l| l.v, |l| l.picked) {
+        // A short window has the strip alone, and little room above or below it.
+        let room = if f.compact { 3 } else { READOUT_ROOM };
+        if let Some(more) = shortlist(&mut lines, room, |l| l.v, |l| l.picked) {
             note = Some(format!("and {more} more"));
         }
         let small = |s: String| text(s).caption().muted().ellipsis().height(Size::Fixed(18.0));
@@ -1540,7 +1569,7 @@ impl Timeline {
             .stroke(Color::srgb_u8(63, 63, 70))
             .radius(6.0)
             .shadow(tokens::SHADOW_MD)
-            .width(Size::Fixed(READOUT_W))
+            .width(Size::Fixed(wide))
             .height(Size::Fixed(h));
         Some((el, h))
     }
@@ -1579,7 +1608,7 @@ impl Timeline {
                 .map(|anchor| Chip { at: frac(hv.t, f.end_s), anchor, width: chip_w(hv.t), what: ChipKind::Hover(hv.t) })
                 .find(|c| {
                     let (a, b) = c.span(f.w);
-                    a >= 0.0 && b <= f.w && taken.iter().all(|(from, to)| b + 4.0 <= *from || a - 4.0 >= *to)
+                    taken.iter().all(|(from, to)| b + 4.0 <= *from || a - 4.0 >= *to)
                 });
             out.extend(chip);
         }
@@ -1903,7 +1932,8 @@ mod tests {
         assert_eq!(hover(&t, "tl:area:hero"), Some(Hover { t: 400.0, on_game: false, track: Track::Hero, y: 150.0 }));
         assert_eq!(hover(&t, "tl:area:row3").map(|h| h.track), Some(Track::Row(3)));
         assert_eq!(hover(&t, "tl:area:lead").map(|h| h.track), Some(Track::Lead));
-        assert_eq!(hover(&t, "tl:area:list").map(|h| h.track), Some(Track::Gap));
+        assert_eq!(hover(&t, "tl:area:list").map(|h| h.track), Some(Track::ListHead));
+        assert_eq!(hover(&t, "tl:area:gap").map(|h| h.track), Some(Track::Gap));
         // Off the tracks, or under something that covers them.
         assert_eq!(hover(&t, "tl:row:3"), None);
         assert_eq!(hover(&t, "tl:jump"), None);
@@ -1978,8 +2008,8 @@ mod tests {
         // Just left of the game's chip (centred on 600, 50 wide): it steps aside.
         assert_eq!(hover_chip(&t, 560.0), Some(Anchor::Before));
         assert_eq!(hover_chip(&t, 640.0), Some(Anchor::After));
-        // At the left edge it cannot be centred.
-        assert_eq!(hover_chip(&t, 10.0), Some(Anchor::After));
+        // At the left edge it is drawn inside the axis, off its line.
+        assert_eq!(t.chips(&frame(at(10.0))).last().map(|c| c.span(1200.0)), Some((0.0, 50.0)));
         // Under the jump button (176 px right of the cursor) there is no room at all.
         t.cursor = Some(900.0);
         assert_eq!(hover_chip(&t, 960.0), None);
@@ -1987,6 +2017,13 @@ mod tests {
         assert_eq!(hover_chip(&t, 900.0), None);
         let on_game = Some(Hover { t: 600.0, on_game: true, track: Track::Hero, y: 100.0 });
         assert!(!t.chips(&frame(on_game)).iter().any(|c| matches!(c.what, ChipKind::Hover(_))));
+        // The game at the very end of the axis, followed: its chip is drawn
+        // inside the axis, and the hover chip keeps clear of where it is drawn.
+        let mut over = timeline();
+        over.set_game(1200.0);
+        assert_eq!(over.chips(&frame(None))[0].span(1200.0), (1150.0, 1200.0));
+        assert_eq!(hover_chip(&over, 1160.0), None, "between the chip and the edge: no room");
+        assert_eq!(hover_chip(&over, 1140.0), Some(Anchor::Before));
         // Whatever is on the ruler, no two chips overlap.
         for time in [0.0, 300.0, 580.0, 620.0, 880.0, 1000.0, 1190.0] {
             let spans: Vec<(f32, f32)> = t.chips(&frame(at(time))).iter().map(|c| c.span(1200.0)).collect();
@@ -2038,10 +2075,44 @@ mod tests {
         // A click beside the open list closes it.
         t.on_event(&UiEvent::synthetic_click("tl:metric:dismiss"), &cx);
         assert!(!t.metric_open);
-        // No list where there is no large chart to hang it from (a short window).
+        // No list where there is no large chart to hang it from (a short
+        // window): not drawn, and closed by the next event.
         t.metric_open = true;
         t.shown.set(Shown { hover: false, hero: false, tracks_h: 200.0 });
         assert!(t.layers().is_empty());
+        t.on_event(&UiEvent::synthetic_click("tl:hide"), &cx);
+        assert!(!t.metric_open);
+    }
+
+    #[test]
+    fn a_selection_survives_data_with_less_in_it() {
+        let mut t = teams_of(16);
+        t.per_player = true;
+        t.hero = 8;
+        t.picked = Some(17);
+        assert_eq!((t.hero(), t.picked()), (8, Some(17)));
+        // A host replaces the data: two players, one metric.
+        t.data = two_sided([&[1.0; 160], &[2.0; 160]]);
+        t.data.metrics.truncate(1);
+        assert_eq!((t.hero(), t.picked()), (0, None));
+        let theme = Theme::default();
+        let cx = BuildCx::new(&theme).with_viewport(1180.0, 900.0);
+        t.forced_hover = Some(Hover { t: 300.0, on_game: false, track: Track::Hero, y: 300.0 });
+        let _ = t.view(&cx);
+    }
+
+    #[test]
+    fn a_press_that_leaves_the_window_is_over() {
+        let mut t = timeline();
+        let cx = EventCx::new();
+        t.pointer = Some((700.0, 250.0));
+        let mut down = UiEvent::synthetic_click("tl:area:hero");
+        down.kind = UiEventKind::PointerDown;
+        t.on_event(&down, &cx);
+        // No release ever comes for it; the pointer comes back.
+        t.pointer_moved(None, &cx);
+        t.pointer_moved(Some((700.0, 250.0)), &cx);
+        assert!(hover(&t, "tl:area:hero").is_some());
     }
 
     #[test]
@@ -2049,6 +2120,7 @@ mod tests {
         let mut t = timeline();
         let cx = EventCx::new();
         t.cursor = Some(300.0);
+        t.shown.set(Shown { hover: false, hero: true, tracks_h: 600.0 });
         t.metric_open = true;
         let mut escape = UiEvent::synthetic_click(KEY_METRIC);
         escape.kind = UiEventKind::Escape;
@@ -2071,6 +2143,8 @@ mod tests {
             assert_eq!(top + h, t.tracks_height(&frame(true)));
             let (gap_top, gap_h) = t.track_span(Track::Gap);
             assert_eq!(gap_top + gap_h, t.track_span(Track::Hero).0);
+            let (head_top, head_h) = t.track_span(Track::ListHead);
+            assert_eq!(head_top + head_h, t.track_span(Track::Row(0)).0);
         }
     }
 
