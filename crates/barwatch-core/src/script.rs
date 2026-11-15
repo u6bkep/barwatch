@@ -152,8 +152,9 @@ mod tests {
         // exactly one of each host key
         let count = |key: &str| s.lines().filter(|l| l.trim().starts_with(key)).count();
         assert_eq!(count("hostport="), 1);
-        assert_eq!(count("hostip="), 1);
         assert_eq!(count("ishost="), 1);
+        // the [game]-level one we wrote, and the one inside [modoptions]
+        assert_eq!(count("hostip="), 2);
     }
 
     #[test]

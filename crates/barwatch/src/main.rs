@@ -97,11 +97,13 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
                 eprintln!("note: {notice}");
             }
         });
+        tokio::pin!(run);
         tokio::select! {
-            _ = run => {}
+            _ = &mut run => {}
             _ = tokio::signal::ctrl_c() => {
+                // Let the client leave properly: it closes the engine and tells the server.
                 let _ = tx.send(client::Command::Leave);
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(8), run).await;
             }
         }
         Ok(())
