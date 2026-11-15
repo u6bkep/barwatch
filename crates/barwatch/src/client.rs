@@ -6,6 +6,7 @@
 
 use crate::content;
 use crate::datadir::DataDir;
+use crate::position::{self, Position};
 use anyhow::{bail, ensure, Context, Result};
 use barwatch_core::api::{
     self, ApiError, Created, JoinRequest, JoinResponse, Phase, ServerInfo, SessionView, ViewerState, ViewerUpdate, API_VERSION,
@@ -53,6 +54,11 @@ pub struct Update {
     pub name: String,
     /// A one-off message for the user (a refused request, for example).
     pub notice: Option<String>,
+    /// Where our engine is in the replay, as its reporter widget last said;
+    /// [`Position::seconds_at`] gives game seconds for any instant. `None`: no engine,
+    /// no report yet, or none for [`position::STALE_AFTER`] (user widgets switched off
+    /// in BAR, engine stuck).
+    pub position: Option<Position>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +76,11 @@ enum Internal {
     Gone,
     Progress(String, Option<f32>),
     Provisioned(Result<PathBuf, String>),
+    /// From the follower of the engine started `launch`-th.
+    Position {
+        launch: u64,
+        position: Option<Position>,
+    },
 }
 
 /// How often the server hears from us; it forgets a viewer after 30 s of silence.
@@ -92,7 +103,8 @@ pub async fn run(
     notify: impl Fn(Update) + Send + Sync + 'static,
 ) {
     let client = Client { http, server, session_id, settings };
-    let mut update = Update { session: None, stage: Stage::Connecting, name: client.settings.name.clone(), notice: None };
+    let mut update =
+        Update { session: None, stage: Stage::Connecting, name: client.settings.name.clone(), notice: None, position: None };
     notify(update.clone());
 
     let joined = match client.register(None).await {
@@ -109,6 +121,7 @@ pub async fn run(
     notify(update.clone());
 
     let (tx, mut events) = mpsc::unbounded_channel();
+    let to_self = tx.clone();
     let follower = tokio::spawn(follow(client.http.clone(), client.session_url(""), joined.session.rev, tx.clone()));
     let provisioner = tokio::spawn(provision(
         client.http.clone(),
@@ -125,11 +138,21 @@ pub async fn run(
     // The run of the party our engine was last started for.
     let mut launched_run: Option<u32> = None;
     let mut reported: Option<(ViewerState, String)> = None;
+    // Reads our engine's position out of its log; one per engine started.
+    let mut positions: Option<tokio::task::JoinHandle<()>> = None;
+    let mut launches: u64 = 0;
 
     loop {
         tokio::select! {
             Some(event) = events.recv() => match event {
-                Internal::Session(view) => update.session = Some(*view),
+                Internal::Session(view) => {
+                    // The run our engine was started for is over (stopped, or a new
+                    // one began): the engine, if still up, is in a game that is gone.
+                    if launched_run.is_some_and(|run| run != view.run || view.phase != Phase::Running) {
+                        stop_following(&mut positions, &mut update.position);
+                    }
+                    update.session = Some(*view);
+                }
                 Internal::Gone => {
                     update.stage = Stage::Failed("This watch party no longer exists.".into());
                     notify(update.clone());
@@ -145,6 +168,12 @@ pub async fn run(
                     update.stage = Stage::Ready;
                 }
                 Internal::Provisioned(Err(e)) => update.stage = Stage::Failed(e),
+                Internal::Position { launch, position } => {
+                    if launch != launches || positions.is_none() {
+                        continue; // from an engine we no longer follow
+                    }
+                    update.position = position;
+                }
             },
             command = commands.recv() => match command {
                 Some(Command::Start) => {
@@ -159,6 +188,7 @@ pub async fn run(
             _ = wait(&mut child), if child.is_some() => {
                 child = None;
                 update.stage = Stage::Closed;
+                stop_following(&mut positions, &mut update.position);
             }
         }
 
@@ -174,6 +204,13 @@ pub async fn run(
                     Ok(c) => {
                         child = Some(c);
                         update.stage = Stage::Playing;
+                        stop_following(&mut positions, &mut update.position);
+                        launches += 1;
+                        let (launch, tx) = (launches, to_self.clone());
+                        let log = client.engine_log();
+                        positions = Some(tokio::spawn(position::follow(log, move |position| {
+                            let _ = tx.send(Internal::Position { launch, position });
+                        })));
                     }
                     Err(e) => update.stage = Stage::Failed(format!("{e:#}")),
                 }
@@ -203,6 +240,7 @@ pub async fn run(
 
     follower.abort();
     provisioner.abort();
+    stop_following(&mut positions, &mut update.position);
     if let Some(mut c) = child {
         let _ = c.start_kill();
     }
@@ -216,6 +254,14 @@ async fn wait(child: &mut Option<tokio::process::Child>) {
         }
         None => std::future::pending().await,
     }
+}
+
+/// Forgets our engine's position and stops reading its log.
+fn stop_following(follower: &mut Option<tokio::task::JoinHandle<()>>, position: &mut Option<Position>) {
+    if let Some(task) = follower.take() {
+        task.abort();
+    }
+    *position = None;
 }
 
 fn report_of(stage: &Stage) -> (ViewerState, String) {
@@ -279,6 +325,11 @@ impl Client {
         Ok(())
     }
 
+    /// Where the engine's output goes.
+    fn engine_log(&self) -> PathBuf {
+        self.settings.data.root.join("barwatch_engine.log")
+    }
+
     /// Starts the engine as a spectator of the running party.
     fn launch(&self, engine_dir: &Path, session: &SessionView, name: &str) -> Result<tokio::process::Child> {
         let port = session.game_port.context("the server did not say which port to connect to")?;
@@ -296,9 +347,20 @@ impl Client {
             .with_context(|| format!("writing {}", script_path.display()))?;
         let which = if self.settings.headless { Binary::Headless } else { Binary::Spring };
         let binary = which.find(engine_dir).with_context(|| format!("no engine executable in {}", engine_dir.display()))?;
-        let log_path = data.join("barwatch_engine.log");
+        let log_path = self.engine_log();
         let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-        tokio::process::Command::new(&binary)
+        let mut command = tokio::process::Command::new(&binary);
+        // The position reporter: a folder of our own, never BAR's. Without it the
+        // game runs as before, only its position is unknown.
+        match position::widget_dir().map(|dir| position::install(&dir)) {
+            Some(Ok(Some(datadirs))) => {
+                command.env("SPRING_DATADIR", datadirs);
+            }
+            Some(Ok(None)) => eprintln!("barwatch: the reporter folder's path cannot be given to the engine"),
+            Some(Err(e)) => eprintln!("barwatch: could not write the position reporter: {e}"),
+            None => eprintln!("barwatch: no local data folder for the position reporter"),
+        }
+        command
             .current_dir(engine_dir)
             .arg("--write-dir")
             .arg(data)

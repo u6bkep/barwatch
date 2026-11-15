@@ -15,6 +15,7 @@ mod datadir;
 mod fixtures;
 mod instance;
 mod mapimg;
+mod position;
 mod replays;
 mod timeline;
 mod ui;
@@ -160,6 +161,9 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
     runtime.block_on(async move {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let last = std::sync::Mutex::new(String::new());
+        // The game position, printed once a second while the engine runs.
+        let shown = std::sync::Arc::new(std::sync::Mutex::new((false, None::<position::Position>)));
+        let latest = shown.clone();
         let run = client::run(barwatch_core::http_client()?, server, session, settings, rx, move |update| {
             let phase = update.session.as_ref().map(|s| format!("{:?}", s.phase)).unwrap_or_default();
             let line = format!("[{}] {:?} (party: {phase})", update.name, update.stage);
@@ -171,6 +175,21 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
             if let Some(notice) = &update.notice {
                 eprintln!("note: {notice}");
             }
+            let mut latest = latest.lock().unwrap();
+            if latest.1.is_some() != update.position.is_some() {
+                eprintln!("{}", position_line(update.position.as_ref()));
+            }
+            *latest = (update.stage == client::Stage::Playing, update.position);
+        });
+        let ticker = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let (playing, position) = *shown.lock().unwrap();
+                if playing || position.is_some() {
+                    eprintln!("{}", position_line(position.as_ref()));
+                }
+            }
         });
         tokio::pin!(run);
         tokio::select! {
@@ -181,6 +200,28 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(8), run).await;
             }
         }
+        ticker.abort();
         Ok(())
     })
+}
+
+/// `16:47:01.234 game 5:00.4 (f=9012 1.00x running, report 0.3 s old)`.
+fn position_line(position: Option<&position::Position>) -> String {
+    let clock = chrono::Local::now().format("%H:%M:%S%.3f");
+    let now = std::time::Instant::now();
+    match position.and_then(|p| Some((p, p.seconds_at(now)?))) {
+        Some((p, seconds)) => {
+            let r = p.report;
+            format!(
+                "{clock} game {}:{:04.1} (f={} {:.2}x {}, report {:.1} s old)",
+                (seconds / 60.0) as u32,
+                seconds % 60.0,
+                r.frame,
+                r.speed,
+                if r.paused { "paused" } else { "running" },
+                now.saturating_duration_since(p.seen).as_secs_f32()
+            )
+        }
+        None => format!("{clock} game position unknown"),
+    }
 }
