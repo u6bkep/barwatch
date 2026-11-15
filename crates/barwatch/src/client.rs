@@ -95,7 +95,7 @@ pub async fn run(
     let mut update = Update { session: None, stage: Stage::Connecting, name: client.settings.name.clone(), notice: None };
     notify(update.clone());
 
-    let joined = match client.register().await {
+    let joined = match client.register(None).await {
         Ok(j) => j,
         Err(e) => {
             update.stage = Stage::Failed(format!("{e:#}"));
@@ -186,7 +186,8 @@ pub async fn run(
                 Ok(true) => reported = Some(report),
                 // The server forgot us (it restarted, or we were silent too long).
                 Ok(false) => {
-                    if let Ok(again) = client.register().await {
+                    let playing_as = child.is_some().then(|| update.name.clone());
+                    if let Ok(again) = client.register(playing_as).await {
                         viewer_id = again.viewer_id;
                         if child.is_none() {
                             update.name = again.name;
@@ -241,7 +242,8 @@ impl Client {
         api::app_url(&self.server, &format!("sessions/{}{tail}", self.session_id)).expect("validated server URL")
     }
 
-    async fn register(&self) -> Result<JoinResponse> {
+    /// `playing_as`: the name our engine is in the game under, when there is one.
+    async fn register(&self, playing_as: Option<String>) -> Result<JoinResponse> {
         let info: ServerInfo =
             read(self.http.get(api::app_url(&self.server, "info")?).timeout(Duration::from_secs(20)).send().await)
                 .await
@@ -252,7 +254,7 @@ impl Client {
             info.version,
             env!("CARGO_PKG_VERSION")
         );
-        let body = JoinRequest { name: self.settings.name.clone(), app_version: env!("CARGO_PKG_VERSION").into() };
+        let body = JoinRequest { name: self.settings.name.clone(), app_version: env!("CARGO_PKG_VERSION").into(), playing_as };
         read(self.http.post(self.session_url("/viewers")).json(&body).timeout(Duration::from_secs(20)).send().await)
             .await
             .context("joining the watch party")

@@ -1,7 +1,9 @@
 //! Start scripts: the one that makes `spring-dedicated` host a replay, and the one a
 //! viewer's engine uses to connect to it.
 
-use crate::demo::GameData;
+use crate::demo::{plain_value, GameData};
+use anyhow::{ensure, Context, Result};
+use serde_json::{Map, Value};
 use std::fmt::Write;
 use std::path::Path;
 
@@ -26,81 +28,78 @@ const HOST_KEYS: [&str; 13] = [
 
 /// Builds the script that makes `spring-dedicated` stream `demo_path` to viewers.
 ///
-/// The original setup text is kept byte for byte apart from the `[game]`-level host
-/// keys: it is what viewers' engines build their game setup from. Every `[playerN]`
-/// is marked `isfromdemo` so the server treats those slots as recorded, and the
-/// recording's random seed and content hashes are passed on, without which viewers
-/// load a different game than the one recorded. With the hashes given, the server
-/// needs neither the game nor the map on disk.
-pub fn dedicated_script(game_data: &GameData, demo_path: &Path, host_port: u16, autohost_port: u16) -> String {
-    let added = format!(
-        "\tdemofile={};\n\thostip=;\n\thostport={host_port};\n\tishost=1;\n\tautohostip=127.0.0.1;\n\
-         \tautohostport={autohost_port};\n\tfixedrngseed={};\n\tmaphash={};\n\tmodhash={};\n",
-        demo_path.display(),
-        game_data.random_seed,
-        hex(&game_data.map_hash),
-        hex(&game_data.mod_hash),
-    );
+/// `script` is the replay's setup text as parsed by [`crate::demo::parse_script`].
+/// It is written out afresh rather than edited as text: the replay is a file a
+/// stranger may have made, and a script assembled from the parse can only say what
+/// the parse found. The `[game]`-level host keys are replaced with ours, every
+/// `[playerN]` is marked `isfromdemo` so the server treats those slots as recorded,
+/// and the recording's random seed and content hashes are passed on, without which
+/// viewers load a different game than the one recorded. With the hashes given, the
+/// server needs neither the game nor the map on disk.
+pub fn dedicated_script(
+    script: &Value,
+    game_data: &GameData,
+    demo_path: &Path,
+    host_port: u16,
+    autohost_port: u16,
+) -> Result<String> {
+    let demo = demo_path.to_str().context("the replay's path is not valid text")?;
+    ensure!(plain_value(demo), "the replay's path cannot be written into a start script: {demo:?}");
+    let game = script.get("game").and_then(Value::as_object).context("setup text has no [game] section")?;
 
-    let mut out = String::with_capacity(game_data.setup_text.len() + added.len() + 256);
-    let mut depth = 0usize;
-    // A section header was seen and its `{` has not been yet.
-    let mut pending: Option<Section> = None;
-    for line in game_data.setup_text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if depth == 1 && pending.is_none() && is_host_key(&lower) {
-            continue;
-        }
-        out.push_str(line);
-        if !line.ends_with('\n') {
-            out.push('\n');
-        }
-        if lower.starts_with('[') {
-            pending = Some(match depth {
-                0 if section_name(&lower) == Some("game") => Section::Game,
-                1 if section_name(&lower).is_some_and(is_player_section) => Section::Player,
-                _ => Section::Other,
-            });
-        }
-        // A `key=value;` line never opens or closes a section, whatever its value holds.
-        let structural = !lower.contains('=') || lower.starts_with(['[', '{', '}']);
-        for c in trimmed.chars().filter(|_| structural) {
-            match c {
-                '{' => {
-                    depth += 1;
-                    match pending.take() {
-                        Some(Section::Game) => out.push_str(&added),
-                        Some(Section::Player) => out.push_str("\t\tisfromdemo=1;\n"),
-                        _ => {}
-                    }
-                }
-                '}' => depth = depth.saturating_sub(1),
-                _ => {}
+    let mut out = String::with_capacity(game_data.setup_text.len() + 512);
+    out.push_str("[game]\n{\n");
+    for (key, value) in [
+        ("demofile", demo.to_string()),
+        ("hostip", String::new()),
+        ("hostport", host_port.to_string()),
+        ("ishost", "1".to_string()),
+        ("autohostip", "127.0.0.1".to_string()),
+        ("autohostport", autohost_port.to_string()),
+        ("fixedrngseed", game_data.random_seed.to_string()),
+        ("maphash", hex(&game_data.map_hash)),
+        ("modhash", hex(&game_data.mod_hash)),
+    ] {
+        let _ = writeln!(out, "\t{key}={value};");
+    }
+    for (key, value) in game {
+        match value {
+            Value::Object(section) => {
+                let marker = is_player_section(key).then_some("isfromdemo");
+                emit_section(&mut out, key, section, 1, marker);
             }
+            Value::String(text) if !HOST_KEYS.contains(&key.as_str()) => {
+                let _ = writeln!(out, "\t{key}={text};");
+            }
+            _ => {}
         }
     }
-    out
+    out.push_str("}\n");
+    Ok(out)
 }
 
-enum Section {
-    Game,
-    Player,
-    Other,
-}
-
-fn section_name(lower_line: &str) -> Option<&str> {
-    let rest = lower_line.strip_prefix('[')?;
-    Some(rest[..rest.find(']')?].trim())
+/// Writes `[name] { … }`. `marker`, if given, is a key set to `1` in this section
+/// whatever the original said.
+fn emit_section(out: &mut String, name: &str, section: &Map<String, Value>, depth: usize, marker: Option<&str>) {
+    let pad = "\t".repeat(depth);
+    let _ = writeln!(out, "{pad}[{name}]\n{pad}{{");
+    if let Some(key) = marker {
+        let _ = writeln!(out, "{pad}\t{key}=1;");
+    }
+    for (key, value) in section {
+        match value {
+            Value::Object(sub) => emit_section(out, key, sub, depth + 1, None),
+            Value::String(text) if marker != Some(key.as_str()) => {
+                let _ = writeln!(out, "{pad}\t{key}={text};");
+            }
+            _ => {}
+        }
+    }
+    let _ = writeln!(out, "{pad}}}");
 }
 
 fn is_player_section(name: &str) -> bool {
     name.strip_prefix("player").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-fn is_host_key(lower_line: &str) -> bool {
-    let Some((key, _)) = lower_line.split_once('=') else { return false };
-    HOST_KEYS.contains(&key.trim())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -123,14 +122,19 @@ mod tests {
     use crate::demo::parse_script;
     use crate::demo::tests::SETUP;
 
-    fn game_data() -> GameData {
-        GameData { setup_text: SETUP.to_string(), map_hash: [0xab; 64], mod_hash: [0xcd; 64], random_seed: 42 }
+    fn game_data(setup: &str) -> GameData {
+        GameData { setup_text: setup.to_string(), map_hash: [0xab; 64], mod_hash: [0xcd; 64], random_seed: 42 }
+    }
+
+    fn host(setup: &str) -> Value {
+        let script = parse_script(setup).unwrap();
+        let text = dedicated_script(&script, &game_data(setup), Path::new("/data/replay.sdfz"), 8480, 40001).unwrap();
+        parse_script(&text).unwrap()
     }
 
     #[test]
     fn hosting_script_replaces_host_keys_and_marks_players() {
-        let s = dedicated_script(&game_data(), Path::new("/data/replay.sdfz"), 8480, 40001);
-        let v = parse_script(&s).unwrap();
+        let v = host(SETUP);
         let game = &v["game"];
         assert_eq!(game["demofile"], "/data/replay.sdfz");
         assert_eq!(game["hostport"], "8480");
@@ -147,36 +151,51 @@ mod tests {
         assert!(game["ai0"].get("isfromdemo").is_none());
         // untouched: game content keys and anything below [game] level
         assert_eq!(game["mapname"], "Some Map v1");
+        assert_eq!(game["player0"]["name"], "Alice");
         assert_eq!(game["modoptions"]["hostip"], "keep-me");
         assert_eq!(game["modoptions"]["maxspeed"], "3");
-        // exactly one of each host key
-        let count = |key: &str| s.lines().filter(|l| l.trim().starts_with(key)).count();
+    }
+
+    #[test]
+    fn nothing_but_host_keys_and_the_marker_changes() {
+        let mut original = parse_script(SETUP).unwrap();
+        let mut hosted = host(SETUP);
+        for tree in [&mut original, &mut hosted] {
+            let game = tree["game"].as_object_mut().unwrap();
+            game.retain(|k, _| !HOST_KEYS.contains(&k.as_str()));
+            for (name, section) in game.iter_mut() {
+                if is_player_section(name) {
+                    section.as_object_mut().unwrap().remove("isfromdemo");
+                }
+            }
+        }
+        assert_eq!(original, hosted);
+    }
+
+    #[test]
+    fn a_replay_cannot_set_host_keys() {
+        // each element on one line, a key repeated, a recorded isfromdemo=0
+        let setup = "[game]{mapname=M;hostport=9999;demofile=/etc/passwd;AutoHostPort=1;\n\
+                     hostport=7;[player0]{name=A;isfromdemo=0;}}";
+        let script = parse_script(setup).unwrap();
+        let text = dedicated_script(&script, &game_data(setup), Path::new("/d.sdfz"), 8480, 40001).unwrap();
+        let count = |key: &str| text.lines().filter(|l| l.trim().starts_with(key)).count();
         assert_eq!(count("hostport="), 1);
-        assert_eq!(count("ishost="), 1);
-        // the [game]-level one we wrote, and the one inside [modoptions]
-        assert_eq!(count("hostip="), 2);
-    }
-
-    #[test]
-    fn hosting_script_handles_brace_on_header_line() {
-        let gd = GameData { setup_text: "[GAME] {\n[PLAYER0] {\nName=A;\n}\nHostIP=x;\nMapName=M;\n}\n".into(), ..game_data() };
-        let v = parse_script(&dedicated_script(&gd, Path::new("/d.sdfz"), 1, 2)).unwrap();
-        assert_eq!(v["game"]["hostip"], "");
+        assert_eq!(count("demofile="), 1);
+        assert_eq!(count("autohostport="), 1);
+        assert_eq!(count("isfromdemo="), 1);
+        let v = parse_script(&text).unwrap();
+        assert_eq!(v["game"]["hostport"], "8480");
+        assert_eq!(v["game"]["demofile"], "/d.sdfz");
         assert_eq!(v["game"]["player0"]["isfromdemo"], "1");
-        assert_eq!(v["game"]["player0"]["name"], "A");
-        assert_eq!(v["game"]["mapname"], "M");
     }
 
     #[test]
-    fn braces_inside_values_do_not_confuse_section_depth() {
-        let gd = GameData {
-            setup_text: "[game]\n{\n[modoptions]\n{\ntweak={a}{;\n}\nhostip=x;\n[player0]\n{\nname=A;\n}\n}\n".into(),
-            ..game_data()
-        };
-        let s = dedicated_script(&gd, Path::new("/d.sdfz"), 1, 2);
-        assert!(!s.contains("hostip=x"));
-        assert!(s.contains("tweak={a}{;"));
-        assert_eq!(s.matches("isfromdemo=1;").count(), 1);
+    fn odd_replay_paths_are_refused() {
+        let script = parse_script(SETUP).unwrap();
+        for path in ["/data/a;b/replay.sdfz", "/data/]]/replay.sdfz", "/data/a\nb.sdfz"] {
+            assert!(dedicated_script(&script, &game_data(SETUP), Path::new(path), 1, 2).is_err(), "{path}");
+        }
     }
 
     #[test]

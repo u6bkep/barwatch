@@ -4,7 +4,7 @@
 //! little-endian). Only the head of the gzip stream is decompressed, so listing a
 //! folder of replays stays cheap.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde_json::{Map, Value};
 use std::io::Read;
 use std::path::Path;
@@ -33,7 +33,9 @@ pub struct Demo {
     pub unix_time: u64,
     pub game_time_s: u32,
     pub wall_time_s: u32,
-    /// Start script as nested objects, keys lowercased; leaves are strings.
+    /// The setup text of `game_data` as nested objects, keys lowercased; leaves are
+    /// strings. Everything barwatch says about a replay, and the script it hosts it
+    /// with, comes from this parse rather than from the raw text.
     pub script: Value,
     pub game_data: GameData,
 }
@@ -75,9 +77,9 @@ impl Demo {
         let game_time_s = i32_at(312).max(0) as u32;
         let wall_time_s = i32_at(316).max(0) as u32;
 
+        // The header's copy of the start script; what counts is the one in the stream.
         let mut script_bytes = vec![0u8; script_size];
         r.read_exact(&mut script_bytes).context("truncated start script")?;
-        let script = parse_script(&String::from_utf8_lossy(&script_bytes)).context("parsing start script")?;
 
         // First chunk of the stream: { f32 modGameTime, u32 length } + packet.
         let mut chunk = [0u8; 8];
@@ -87,6 +89,7 @@ impl Demo {
         let mut packet = vec![0u8; len];
         r.read_exact(&mut packet).context("truncated first packet")?;
         let game_data = parse_game_data(&packet).context("parsing the game-data packet")?;
+        let script = parse_script(&game_data.setup_text).context("parsing the replay's setup text")?;
 
         Ok(Demo { engine_version, unix_time, game_time_s, wall_time_s, script, game_data })
     }
@@ -178,11 +181,38 @@ fn parse_game_data(pkt: &[u8]) -> Result<GameData> {
     })
 }
 
-/// Parses Spring's TDF-like script format: `[name] { key=value; [sub] { … } }`.
+/// Deepest section nesting accepted; real scripts use two levels.
+const MAX_DEPTH: usize = 8;
+
+/// Parses the engine's start-script format: `[name] { key=value; [sub] { … } }`.
+///
+/// The text comes from a file a stranger may have made, and what is parsed here is
+/// later written out again for the engine to read. So this accepts only the plain
+/// subset every real script uses, in which this parser and the engine's
+/// (`gamedata/parse_tdf.lua`) cannot disagree about structure: no comments, no
+/// quoted values, one `;` per value, names of letters, digits and `_`. It also
+/// refuses `[[` and `]]`, which the engine's loader treats as Lua string brackets.
 pub fn parse_script(text: &str) -> Result<Value> {
+    for bad in ["[[", "]]", "/*"] {
+        ensure!(!text.contains(bad), "setup text contains {bad:?}");
+    }
+    ensure!(!text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')), "setup text contains control characters");
     let mut p = ScriptParser { s: text.as_bytes(), i: 0 };
-    let root = p.block(true)?;
+    let root = p.block(0)?;
     Ok(Value::Object(root))
+}
+
+/// Whether `value` can stand in a start script as written: the engine reads a value
+/// up to the next `;` on the same line and treats a leading `"` as a quote.
+pub fn plain_value(value: &str) -> bool {
+    !value.contains(|c: char| matches!(c, ';' | '"') || c.is_control())
+        && !value.contains("[[")
+        && !value.contains("]]")
+        && !value.starts_with([' ', '\t'])
+}
+
+fn plain_name(name: &[u8]) -> bool {
+    !name.is_empty() && name.len() <= 128 && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 struct ScriptParser<'a> {
@@ -192,58 +222,50 @@ struct ScriptParser<'a> {
 
 impl ScriptParser<'_> {
     fn skip_ws(&mut self) {
-        loop {
-            while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
-                self.i += 1;
-            }
-            if self.s[self.i..].starts_with(b"//") {
-                while self.i < self.s.len() && self.s[self.i] != b'\n' {
-                    self.i += 1;
-                }
-            } else {
-                return;
-            }
+        while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
+            self.i += 1;
         }
     }
 
-    fn block(&mut self, top: bool) -> Result<Map<String, Value>> {
+    fn block(&mut self, depth: usize) -> Result<Map<String, Value>> {
+        ensure!(depth <= MAX_DEPTH, "sections nested too deeply");
         let mut map = Map::new();
         loop {
             self.skip_ws();
             if self.i >= self.s.len() {
-                if top {
-                    return Ok(map);
-                }
-                bail!("unterminated block");
+                ensure!(depth == 0, "unterminated section");
+                return Ok(map);
             }
             match self.s[self.i] {
-                b'}' if !top => {
+                b'}' if depth > 0 => {
                     self.i += 1;
                     return Ok(map);
                 }
                 b'[' => {
-                    let end = self.s[self.i..].iter().position(|&c| c == b']').context("unterminated section name")?;
-                    let name = String::from_utf8_lossy(&self.s[self.i + 1..self.i + end]).trim().to_lowercase();
-                    self.i += end + 1;
+                    let rest = &self.s[self.i + 1..];
+                    let end = rest.iter().position(|&c| c == b']').context("unterminated section name")?;
+                    ensure!(plain_name(&rest[..end]), "odd section name at byte {}", self.i);
+                    let name = String::from_utf8_lossy(&rest[..end]).to_lowercase();
+                    self.i += end + 2;
                     self.skip_ws();
                     ensure!(self.i < self.s.len() && self.s[self.i] == b'{', "expected '{{' after [{name}]");
                     self.i += 1;
-                    let sub = self.block(false)?;
+                    let sub = self.block(depth + 1)?;
                     map.insert(name, Value::Object(sub));
                 }
                 _ => {
                     let rest = &self.s[self.i..];
-                    let eq = rest.iter().position(|&c| c == b'=' || c == b'\n' || c == b'}');
-                    match eq {
-                        Some(eq) if rest[eq] == b'=' => {
-                            let key = String::from_utf8_lossy(&rest[..eq]).trim().to_lowercase();
-                            let semi = rest[eq..].iter().position(|&c| c == b';').context("value without ';'")?;
-                            let val = String::from_utf8_lossy(&rest[eq + 1..eq + semi]).trim().to_owned();
-                            map.insert(key, Value::String(val));
-                            self.i += eq + semi + 1;
-                        }
-                        _ => bail!("unexpected text at byte {}", self.i),
-                    }
+                    let eq =
+                        rest.iter().position(|&c| c == b'=').with_context(|| format!("unexpected text at byte {}", self.i))?;
+                    let key = rest[..eq].trim_ascii_end();
+                    ensure!(plain_name(key) && !rest[..eq].contains(&b'\n'), "odd key at byte {}", self.i);
+                    let after = &rest[eq + 1..];
+                    let lead = after.iter().take_while(|c| matches!(c, b' ' | b'\t')).count();
+                    let semi = after.iter().position(|&c| c == b';').context("value without ';'")?;
+                    let value = String::from_utf8_lossy(&after[lead.min(semi)..semi]).into_owned();
+                    ensure!(plain_value(&value), "odd value for {:?}", String::from_utf8_lossy(key));
+                    map.insert(String::from_utf8_lossy(key).to_lowercase(), Value::String(value));
+                    self.i += eq + 1 + semi + 1;
                 }
             }
         }
@@ -310,6 +332,38 @@ hostip=1.2.3.4;\nhostport=8452;\nishost=1;\nmyplayername=Host;\ngametype=Some Ga
         let roster = demo.roster();
         assert_eq!(roster.teams, vec![vec!["Alice".to_string()], vec!["BARb (AI)".to_string()]]);
         assert_eq!(roster.spectators, ["Watcher"]);
+    }
+
+    #[test]
+    fn script_parser_accepts_the_plain_subset() {
+        let v = parse_script("[GAME]\r\n{\r\n\tMapName = Some Map v1;\r\n[Player0] {Name=[x]y;}\r\n}\r\n").unwrap();
+        assert_eq!(v["game"]["mapname"], "Some Map v1");
+        assert_eq!(v["game"]["player0"]["name"], "[x]y");
+        // several elements on one line are still separate elements
+        let v = parse_script("[game]{a=1;b=2;[s]{c=3;}}").unwrap();
+        assert_eq!(v["game"]["b"], "2");
+        assert_eq!(v["game"]["s"]["c"], "3");
+    }
+
+    #[test]
+    fn script_parser_refuses_what_the_engine_reads_differently() {
+        for (bad, why) in [
+            ("[game]{/**/hostport=1;}", "comment"),
+            ("[game]{// x\nhostport=1;}", "line comment"),
+            ("[game]{a=\"x;y\";}", "quoted value"),
+            ("[game]{a=1;;}", "doubled semicolon"),
+            ("[game]{a=]]], (function() end)()) --;}", "lua bracket"),
+            ("[game]{a=[[x;}", "lua bracket"),
+            ("[game]{a=1\nb=2;}", "value across lines"),
+            ("[ga me]{a=1;}", "section name"),
+            ("[game]{a b=1;}", "key"),
+            ("[game]{a=1;", "unterminated"),
+            ("a=1;}", "stray brace"),
+        ] {
+            assert!(parse_script(bad).is_err(), "{why}: {bad}");
+        }
+        let deep = "[a]{".repeat(20_000);
+        assert!(parse_script(&deep).is_err());
     }
 
     #[test]

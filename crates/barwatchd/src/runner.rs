@@ -41,10 +41,26 @@ const SKIP_SAFE_AFTER: Duration = Duration::from_millis(1500);
 /// shorter than a viewer's first launch can take.
 const ENGINE_FIRST_VIEWER_WAIT_S: u32 = 600;
 
-/// Makes sure the engine for `session` is installed. Serialized across sessions.
+/// Makes sure the engine for `session` is installed. Installs are serialized; a
+/// party whose engine is already there never waits for another party's download.
 pub async fn ensure_engine(app: &App, session: &Session) -> Result<std::path::PathBuf> {
+    let version = &session.demo.engine_version;
+    if let Some(dir) = engine::find(&app.engines_dir(), version, Binary::Dedicated) {
+        return Ok(dir);
+    }
     let _guard = app.engine_lock.lock().await;
-    engine::ensure(&app.http, &app.engines_dir(), &session.demo.engine_version, Os::Linux, Binary::Dedicated, &|_, _| {}).await
+    engine::ensure(&app.http, &app.engines_dir(), version, Os::Linux, Binary::Dedicated, &|_, _| {}).await
+}
+
+/// Resolves when the run is told to stop (or its session is gone).
+async fn stop_requested(cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>) {
+    loop {
+        match cmds.recv().await {
+            Some(RunnerCmd::Stop) | None => return,
+            // Nothing to control yet.
+            Some(RunnerCmd::Control(_)) => {}
+        }
+    }
 }
 
 /// Owns one run from launch to exit and leaves the session `Idle` (or `Failed`).
@@ -71,7 +87,11 @@ pub async fn run(app: Arc<App>, session: Arc<Session>, mut cmds: mpsc::Unbounded
 }
 
 async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>) -> Result<String> {
-    let engine_dir = ensure_engine(app, session).await?;
+    // This can be a download; Stop must still work while it runs.
+    let engine_dir = tokio::select! {
+        dir = ensure_engine(app, session) => dir?,
+        _ = stop_requested(cmds) => return Ok("stopped".into()),
+    };
     let binary = Binary::Dedicated.find(&engine_dir).context("engine has no dedicated server")?;
     let lease = app.take_port().context("every game port is in use; stop another session first")?;
     let autohost = UdpSocket::bind(("127.0.0.1", 0)).await.context("opening the control socket")?;
@@ -82,7 +102,13 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
     tokio::fs::create_dir_all(&run_dir).await.with_context(|| format!("creating {}", run_dir.display()))?;
     let script_path = run_dir.join("script.txt");
     let config_path = run_dir.join("springsettings.cfg");
-    let script = script::dedicated_script(&session.demo.game_data, &session.replay_path(), lease.port, autohost_port);
+    let script = script::dedicated_script(
+        &session.demo.script,
+        &session.demo.game_data,
+        &session.replay_path(),
+        lease.port,
+        autohost_port,
+    )?;
     tokio::fs::write(&script_path, script).await?;
     tokio::fs::write(&config_path, format!("InitialNetworkTimeout = {ENGINE_FIRST_VIEWER_WAIT_S}\n")).await?;
     let log = std::fs::File::create(run_dir.join("server.log"))?;
@@ -132,7 +158,11 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             }
             received = link.socket.recv_from(&mut buf) => {
                 let (len, from) = received?;
-                link.peer = Some(from);
+                // The server we launched is the first to speak; nobody else on this
+                // machine gets to feed events in or have commands sent to them.
+                if *link.peer.get_or_insert(from) != from {
+                    continue;
+                }
                 match Event::parse(&buf[..len]) {
                     Some(Event::Started) => {
                         listening = true;

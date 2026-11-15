@@ -2,7 +2,7 @@
 Type=Application
 Name=barwatch
 Comment=Watch Beyond All Reason replays together
-Exec=barwatch %u
+Exec=barwatch -- %u
 Icon=barwatch
 Terminal=false
 Categories=Game;

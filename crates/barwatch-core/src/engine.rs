@@ -143,13 +143,21 @@ pub async fn ensure(
     tokio::fs::create_dir_all(root).await.with_context(|| format!("creating {}", root.display()))?;
     // Unpack beside the destination and rename, so a half-extracted engine is never
     // mistaken for an installed one.
-    let stage = root.join(format!(".barwatch-{}", std::process::id()));
-    let _ = tokio::fs::remove_dir_all(&stage).await;
-    tokio::fs::create_dir_all(&stage).await?;
-    let result = install(http, &stage, &dest, version, os, needs, progress).await;
-    let _ = tokio::fs::remove_dir_all(&stage).await;
-    result?;
+    let stage = StageDir(root.join(format!(".barwatch-{}", std::process::id())));
+    let _ = tokio::fs::remove_dir_all(&stage.0).await;
+    tokio::fs::create_dir_all(&stage.0).await?;
+    install(http, &stage.0, &dest, version, os, needs, progress).await?;
     Ok(dest)
+}
+
+/// The directory an install is staged in; removed however the install ends,
+/// including when its task is cancelled half way.
+struct StageDir(PathBuf);
+
+impl Drop for StageDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 async fn install(
@@ -191,6 +199,11 @@ async fn install(
         }
     }
     ensure!(needs.find(&unpacked).is_some(), "the engine {version} archive has no {}", needs.stem());
+    if needs.find(dest).is_some() {
+        // Someone else (another barwatch, or BAR's launcher) installed it while we
+        // were downloading. Theirs may already be running: leave it alone.
+        return Ok(());
+    }
     if dest.exists() {
         // Present but without the executable we need: an incomplete directory.
         tokio::fs::remove_dir_all(dest).await.with_context(|| format!("replacing {}", dest.display()))?;
@@ -217,13 +230,18 @@ pub async fn download(http: &reqwest::Client, url: &str, dest: &Path, progress: 
     Ok(())
 }
 
-/// Pure-Rust extraction first; falls back to a system `7z` if that fails.
+/// Pure-Rust extraction first; on Unix, falls back to a system `7z` if that fails.
 fn extract_7z(archive: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let builtin = match sevenz_rust2::decompress_file(archive, dest) {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
+    // Windows looks for a program by name in the folder of the running one first
+    // (for a freshly downloaded app, the Downloads folder), so none is run there.
+    if cfg!(windows) {
+        bail!("could not unpack the engine: {builtin}");
+    }
     let _ = std::fs::remove_dir_all(dest);
     std::fs::create_dir_all(dest)?;
     let out = std::process::Command::new("7z")

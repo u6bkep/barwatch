@@ -124,6 +124,10 @@ The app's window is built with [damascene](https://github.com/computer-whisperer
   it does for any game you spectate.
 - Do not run barwatch while a BAR game is open on the same data folder; the two
   engines would share one log and settings file.
+- A replay is a recording of engine network traffic, and the server plays it to every
+  viewer's engine. Host replays from sources you would open locally. The setup text
+  of an uploaded replay is parsed strictly and written out afresh before the engine
+  sees it; a replay that does not fit the plain format every real one uses is refused.
 - A second invite link opens a second window rather than reusing the open one.
 
 ## Development

@@ -45,10 +45,35 @@ impl IntoResponse for ApiErr {
 
 type ApiResult<T> = Result<T, ApiErr>;
 
+/// Body limit of every route except the two that take a replay.
+const SMALL_BODY: usize = 16 * 1024;
+
+/// Proof that the request carries a valid pairing token. Extracted before the body,
+/// so an upload without one is refused without being read.
+struct Paired;
+
+impl axum::extract::FromRequestParts<Arc<App>> for Paired {
+    type Rejection = ApiErr;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, app: &Arc<App>) -> Result<Self, ApiErr> {
+        let token = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if app.token_valid(token) {
+            Ok(Paired)
+        } else {
+            Err(ApiErr(StatusCode::UNAUTHORIZED, "this app is not paired with the server (or was unpaired)".into()))
+        }
+    }
+}
+
 pub fn router(app: Arc<App>) -> Router {
     let web_api = Router::new()
         .route("/info", get(info))
-        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions", get(list_sessions).post(create_session).layer(DefaultBodyLimit::max(app.cfg.max_upload)))
         .route("/sessions/{id}", get(get_session).delete(delete_session))
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/stop", post(stop_session))
@@ -58,7 +83,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/tokens/{id}", delete(revoke_token));
     let app_api = Router::new()
         .route("/info", get(info))
-        .route("/sessions", post(create_session_with_token))
+        .route("/sessions", post(create_session_with_token).layer(DefaultBodyLimit::max(app.cfg.max_upload)))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/control", post(control_session))
@@ -69,7 +94,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/app/join/{id}", get(join_page))
         .nest("/api", web_api)
         .nest(barwatch_core::api::APP_PREFIX, app_api)
-        .layer(DefaultBodyLimit::max(app.cfg.max_upload))
+        // Everything but a replay upload is a few hundred bytes of JSON.
+        .layer(DefaultBodyLimit::max(SMALL_BODY))
         .with_state(app)
 }
 
@@ -140,12 +166,7 @@ async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> 
     Ok(Json(Created { id: session.id.clone() }))
 }
 
-async fn create_session_with_token(state: Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Created>> {
-    let token =
-        headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
-    if !state.0.token_valid(token) {
-        return Err(ApiErr(StatusCode::UNAUTHORIZED, "this app is not paired with the server (or was unpaired)".into()));
-    }
+async fn create_session_with_token(_: Paired, state: Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Created>> {
     create_session(state, headers, body).await
 }
 
@@ -179,7 +200,9 @@ async fn start_session(State(app): Shared, Path(id): Path<String>) -> ApiResult<
             st.ended = false;
             st.paused = false;
             st.speed = 1.0;
-            st.run += 1;
+            // Never a number a previous daemon handed out for this party: an app that
+            // was in an earlier run must be able to tell this one apart.
+            st.run = (st.run + 1).max(crate::state::unix_now() as u32);
             st.runner = Some(tx);
             Ok(Some(rx))
         }
@@ -202,10 +225,14 @@ async fn control_session(
     Json(control): Json<Control>,
 ) -> ApiResult<Json<SessionView>> {
     let session = find(&app, &id)?;
-    if let Control::Speed { speed } = control {
-        if !(crate::chat::MIN_SPEED..=crate::chat::MAX_SPEED).contains(&speed) {
+    match control {
+        Control::Speed { speed } if !(crate::chat::MIN_SPEED..=crate::chat::MAX_SPEED).contains(&speed) => {
             return Err(ApiErr::bad("speed out of range"));
         }
+        Control::Skip { seconds, .. } if seconds > crate::chat::MAX_SKIP_S => {
+            return Err(ApiErr::bad("that is further than any replay goes"));
+        }
+        _ => {}
     }
     let sent = session.read(|st| match (&st.runner, st.phase) {
         (Some(tx), Phase::Running) => tx.send(RunnerCmd::Control(control)).is_ok(),
@@ -236,7 +263,9 @@ async fn delete_session(State(app): Shared, Path(id): Path<String>) -> ApiResult
 
 async fn join_session(State(app): Shared, Path(id): Path<String>, Json(req): Json<JoinRequest>) -> ApiResult<Json<JoinResponse>> {
     let session = find(&app, &id)?;
-    let (viewer_id, name) = session.join(&req.name);
+    let (viewer_id, name) = session
+        .join(&req.name, req.playing_as.as_deref())
+        .ok_or_else(|| ApiErr(StatusCode::TOO_MANY_REQUESTS, "this watch party is full".into()))?;
     Ok(Json(JoinResponse { viewer_id, name, session: view(&app, &session) }))
 }
 

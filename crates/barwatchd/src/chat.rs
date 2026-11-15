@@ -6,6 +6,8 @@ use barwatch_core::api::Control;
 pub const HELP: &str = "barwatch: !skip 14:00 (to a game time)  !skip +2m (ahead)  !pause  !resume  !speed 2";
 pub const MIN_SPEED: f32 = 0.3;
 pub const MAX_SPEED: f32 = 20.0;
+/// A day of game time is far beyond any replay; refuse nonsense early.
+pub const MAX_SKIP_S: u32 = 24 * 3600;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -58,8 +60,7 @@ pub fn parse_target(text: &str) -> Option<(u32, bool)> {
     } else {
         text.strip_suffix('s').unwrap_or(text).parse().ok()?
     };
-    // A day of game time is far beyond any replay; refuse nonsense early.
-    (seconds <= 24 * 3600).then_some((seconds, relative))
+    (seconds <= MAX_SKIP_S).then_some((seconds, relative))
 }
 
 #[cfg(test)]

@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, watch};
 
 /// A viewer that has not reported for this long is forgotten.
 pub const VIEWER_TTL: Duration = Duration::from_secs(30);
+/// Most desktop apps registered with one party at a time. Registering needs no
+/// login, so it must not be a way to grow the daemon without bound.
+pub const MAX_VIEWERS: usize = 64;
 
 pub struct Config {
     /// Absolute path of the data directory.
@@ -301,13 +304,11 @@ impl Session {
 
     /// Changes the state and wakes everyone waiting on this session.
     pub fn mutate<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
-        let (r, rev) = {
-            let mut st = self.state.lock().unwrap();
-            let r = f(&mut st);
-            st.rev += 1;
-            (r, st.rev)
-        };
-        self.rev.send_replace(rev);
+        let mut st = self.state.lock().unwrap();
+        let r = f(&mut st);
+        st.rev += 1;
+        // Published under the lock, so waiters never see revisions out of order.
+        self.rev.send_replace(st.rev);
         r
     }
 
@@ -359,12 +360,25 @@ impl Session {
     }
 
     /// Registers a desktop app; returns its secret id and the name its engine must use.
-    pub fn join(&self, wanted_name: &str) -> (String, String) {
+    ///
+    /// `playing_as` is the name of an engine this app already has in the game (it is
+    /// registering again after the server forgot it); that name is kept if no other
+    /// registered viewer holds it. `None` when the party is full.
+    pub fn join(&self, wanted_name: &str, playing_as: Option<&str>) -> Option<(String, String)> {
         self.mutate(|st| {
-            let mut taken = self.demo.player_names();
-            taken.extend(st.viewers.iter().map(|v| v.name.clone()));
-            taken.extend(st.in_game.values().cloned());
-            let name = names::unique(wanted_name, &taken);
+            if st.viewers.len() >= MAX_VIEWERS {
+                return None;
+            }
+            let registered = |name: &str| st.viewers.iter().any(|v| v.name == name);
+            let name = match playing_as {
+                Some(current) if st.in_game.values().any(|n| n == current) && !registered(current) => current.to_owned(),
+                _ => {
+                    let mut taken = self.demo.player_names();
+                    taken.extend(st.viewers.iter().map(|v| v.name.clone()));
+                    taken.extend(st.in_game.values().cloned());
+                    names::unique(wanted_name, &taken)
+                }
+            };
             let id = random_id(22);
             st.viewers.push(Viewer {
                 id: id.clone(),
@@ -373,7 +387,7 @@ impl Session {
                 detail: String::new(),
                 last_seen: Instant::now(),
             });
-            (id, name)
+            Some((id, name))
         })
     }
 

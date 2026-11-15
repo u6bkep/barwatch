@@ -55,7 +55,7 @@ mod imp {
             std::fs::create_dir_all(&dir)?;
             let entry = format!(
                 "[Desktop Entry]\nType=Application\nName=barwatch\nComment=Watch Beyond All Reason replays together\n\
-                 Exec=\"{}\" %u\nIcon=barwatch\nTerminal=false\nCategories=Game;\nMimeType={MIME};\nStartupWMClass=barwatch\n",
+                 Exec=\"{}\" -- %u\nIcon=barwatch\nTerminal=false\nCategories=Game;\nMimeType={MIME};\nStartupWMClass=barwatch\n",
                 exe.display()
             );
             std::fs::write(dir.join(DESKTOP_FILE), entry)?;
@@ -93,7 +93,8 @@ mod imp {
     }
 
     fn command_for(exe: &std::path::Path) -> String {
-        format!("\"{}\" \"%1\"", exe.display())
+        // `--` ends the options: whatever a link contains, it is only ever the link.
+        format!("\"{}\" -- \"%1\"", exe.display())
     }
 
     /// Copies this program to its permanent place, unless it already runs from there.
@@ -119,13 +120,14 @@ mod imp {
     fn add_start_menu_entry(target: &std::path::Path) {
         use std::os::windows::process::CommandExt;
         let Some(programs) = dirs::data_dir().map(|d| d.join(r"Microsoft\Windows\Start Menu\Programs")) else { return };
-        let script = format!(
-            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.Save()",
-            programs.join("barwatch.lnk").display().to_string().replace('\'', "''"),
-            target.display().to_string().replace('\'', "''"),
-        );
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        let Some(system) = std::env::var_os("SystemRoot") else { return };
+        // The paths travel as environment variables, so no path can be read as script.
+        let powershell = std::path::Path::new(&system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BARWATCH_LNK);$s.TargetPath=$env:BARWATCH_EXE;$s.Save()";
+        let _ = std::process::Command::new(powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("BARWATCH_LNK", programs.join("barwatch.lnk"))
+            .env("BARWATCH_EXE", target)
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn();
     }

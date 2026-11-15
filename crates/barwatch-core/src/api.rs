@@ -116,6 +116,10 @@ pub struct SessionView {
 pub struct JoinRequest {
     pub name: String,
     pub app_version: String,
+    /// Set when registering again while this viewer's engine is still in the game:
+    /// the name that engine uses, to be kept instead of handing out a fresh one.
+    #[serde(default)]
+    pub playing_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
