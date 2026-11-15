@@ -81,7 +81,8 @@ impl App for Proto {
         .gap(tokens::SPACE_3)
         .align(Align::Center);
         let frame = if self.speed > 0.0 { Duration::from_millis(50) } else { Duration::from_millis(500) };
-        page([stand_in, scroll([self.timeline.view(cx)]).key("proto-scroll").fill_height()]).gap(tokens::SPACE_3).redraw_within(frame)
+        let main = page([stand_in, scroll([self.timeline.view(cx)]).key("proto-scroll").fill_height()]).gap(tokens::SPACE_3).redraw_within(frame);
+        overlays(main, self.timeline.layers().into_iter().map(Some))
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
@@ -103,5 +104,8 @@ impl App for Proto {
     }
 }
 
-/// The window host's own hooks; the pointer hook stays the default no-op here.
-impl barwatch_host::WinitWgpuApp for Proto {}
+impl barwatch_host::WinitWgpuApp for Proto {
+    fn pointer_moved(&mut self, position: Option<(f32, f32)>, cx: &EventCx) -> bool {
+        self.timeline.pointer_moved(position, cx)
+    }
+}

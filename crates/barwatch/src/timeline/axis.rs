@@ -41,6 +41,38 @@ pub fn tick_step(end_s: f32, max_ticks: f32) -> f32 {
         .unwrap_or(7200.0)
 }
 
+/// The box a tick's label is drawn in, px: the text is about 40 wide, centred.
+pub const TICK_LABEL_BOX: f32 = 56.0;
+
+/// A tick of the ruler.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tick {
+    /// Its moment, in game seconds.
+    pub t: f32,
+    /// Whether its label is written: not where something else sits on the ruler.
+    pub labelled: bool,
+}
+
+/// The ticks of a ruler `w` px wide that ends at `end_s`. A label is centred
+/// on its tick but kept inside the axis, so the first and the last sit
+/// off-centre; it is left out where it would run into one of `taken` (spans
+/// in px along the axis: the position chips).
+pub fn ticks(end_s: f32, w: f32, taken: &[(f32, f32)]) -> Vec<Tick> {
+    let step = tick_step(end_s, (w / 90.0).max(2.0));
+    let half = TICK_LABEL_BOX / 2.0;
+    // The text and a little air either side.
+    let reach = 24.0;
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    while t <= end_s + 0.5 {
+        let x = (frac(t, end_s) * w).clamp(half, (w - half).max(half));
+        let labelled = !taken.iter().any(|(from, to)| x + reach > *from && x - reach < *to);
+        out.push(Tick { t, labelled });
+        t += step;
+    }
+    out
+}
+
 pub fn clock(seconds: f32) -> String {
     let s = seconds.max(0.0).round() as u32;
     if s >= 3600 {
@@ -147,6 +179,24 @@ mod tests {
         }
         assert_eq!(time_at(-50.0, 40.0, 600.0, end), 0.0);
         assert_eq!(time_at(5000.0, 40.0, 600.0, end), end);
+    }
+
+    #[test]
+    fn tick_labels_give_way_to_what_sits_on_the_ruler() {
+        // 40 minutes on 900 px: a tick every five minutes, nine in all.
+        let all = ticks(2400.0, 900.0, &[]);
+        assert_eq!(all.len(), 9);
+        assert!(all.iter().all(|t| t.labelled));
+        // A chip over 15:00 hides that label and no other.
+        let x = frac(900.0, 2400.0) * 900.0;
+        let hidden: Vec<f32> = ticks(2400.0, 900.0, &[(x - 25.0, x + 25.0)]).iter().filter(|t| !t.labelled).map(|t| t.t).collect();
+        assert_eq!(hidden, vec![900.0]);
+        // The last label is drawn inside the axis, left of its tick: a chip
+        // that ends 20 px short of the edge still runs into it.
+        let last = *ticks(2400.0, 900.0, &[(700.0, 880.0)]).last().unwrap();
+        assert_eq!(last, Tick { t: 2400.0, labelled: false });
+        // ... and one that ends well before it does not.
+        assert!(ticks(2400.0, 900.0, &[(700.0, 840.0)]).last().unwrap().labelled);
     }
 
     #[test]

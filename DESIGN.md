@@ -181,7 +181,8 @@ here, "Watch together"). No timeline on the web page for now.
 
 - `Timeline`: state and behaviour. `view(&BuildCx) -> El`, `on_event(&UiEvent, &EventCx)
   -> Option<Action>` (`Action::Jump(seconds)`), `set_game(seconds)`, `cancel_jump()`,
-  `set_icons(Icons)`, `take_focus_request()`. A host app must also return
+  `set_icons(Icons)`, `take_focus_request()`, and since T1 `pointer_moved(position,
+  &EventCx) -> bool` and `layers() -> Vec<El>` (§5.5, §5.8). A host app must also return
   `timeline::shaders()` from `App::shaders`.
 - `Data`: teams, sides, metrics (`MetricDef`), series, markers. Built today from the
   statistics stored in a client-recorded replay (`Data::from_replay`);
@@ -250,14 +251,31 @@ until its own engine reaches the target. A refused request calls
 
 ### 5.5 Hover (copied host crate)
 
-Copy `damascene-winit-wgpu` 0.9.0 into the workspace as `crates/barwatch-host` (MIT OR
-Apache-2.0; keep its licence notices) and use it instead of the crates.io crate. One
-change: on every cursor move it calls a hook on the app with the position (`None` when
-the pointer leaves) and redraws if the hook says so. `damascene-core` is untouched.
+Built (T1). `crates/barwatch-host` is `damascene-winit-wgpu` 0.9.0, copied (MIT OR
+Apache-2.0, its licence files kept; `crates/barwatch-host/README.md` lists every
+difference). The one change in behaviour: `WinitWgpuApp::pointer_moved(position, cx) ->
+bool`, called on every cursor move with the position in logical px (`None` when the
+pointer leaves the window), after the events that move caused; `true` asks for a frame.
+The default does nothing. An app that wants it implements `WinitWgpuApp` and starts
+through `run_host_app` / `run_host_app_with_config`: `Proto` passes it to
+`Timeline::pointer_moved`, `Ui` keeps the default. `damascene-core` is untouched.
 
-With that, the timeline gets:
-- a hover line across all tracks with a readout, without moving the cursor;
-- hover feedback on everything clickable.
+What the timeline does with it:
+- **A hover line** across all tracks, thin and plain beside the white game line and the
+  amber cursor, with its time on the ruler. It snaps exactly as a click does (onto the
+  game line, onto a marker), so it shows where a click would put the cursor. It never
+  moves the cursor, and it is not drawn while a press drags the cursor, nor under a
+  menu or the jump button.
+- **A readout** beside the line for the track under the pointer: the moment, what the
+  track shows, and its values there (the six highest and the picked player when there
+  are more). Hollow rings mark the values on the lines; the cursor's dots are solid.
+  The gutter keeps showing the cursor's values. Where the numbers are hidden the readout
+  gives the reason instead, so hovering the fog gives nothing away.
+- **Hover feedback** on what a click acts on: a marker badge steps forward, a metric
+  row and a player row light up, the jump button brightens and gains a rim.
+
+The timeline learns which track is under the pointer from `BuildCx::hovered_key`, so
+anything drawn over the tracks hides the hover line with no extra bookkeeping.
 
 ### 5.6 Pictures from the installed game
 
@@ -276,22 +294,36 @@ built-in glyph, as it does now.
 
 The timeline goes into the party view once the party runs and this viewer is in game,
 below the existing status and above the viewer list; the window's default size grows
-to fit it. `Ui` implements the host hook (§5.5), returns the timeline's shaders, and
-passes on its focus requests. `Proto` remains for development.
+to fit it. `Ui` passes the host hook to `Timeline::pointer_moved` (§5.5; it already
+implements `WinitWgpuApp` with the default), puts `Timeline::layers()` among its root
+overlays, returns the timeline's shaders, and passes on its focus requests. `Proto`
+remains for development and shows the wiring.
 
 ### 5.8 Changes the user asked for after seeing the prototype
 
 "It is not immediately clear what the main timeline graph is showing, or how to change
-it."
-- The large chart's title names the metric and is itself the control that opens the
-  list of metrics.
-- The metric rows highlight on hover; the selected one is marked as the one shown
-  above.
-- The hover readout (§5.5).
+it." Built (T1):
+- The large chart's title is a select control that names the metric and opens the list
+  of metrics (`Timeline::layers` returns the open list; a host puts it at the root of
+  its view, where popovers must be).
+- The large chart and its controls stand on one surface. Below it, under the words
+  "Shown in the large chart:", every metric row starts with a radio mark: the chosen
+  row's is filled and the row is lit with the large chart's surface; a row under the
+  pointer lights up and previews the mark.
+- The hover readout (§5.5) names the metric of whatever track the pointer is on.
+- With "by player" and a player picked, the compact rows show that player alone: their
+  line in their colour, their value, and their place among all players ("#3 of 18").
+- The ruler's tick labels no longer run into the chips (the last label sits inside the
+  axis, off its tick); the large chart's grid labels show the round values of the scale
+  being glided to instead of the numbers in between.
 
-Also open from the prototype: the compact rows should follow "by player" for the
-picked player; the fight-heat scale (damage per metal of income, full at 8) is a guess
-to revisit with real games.
+REJECTED for the clarity problem: opening the chosen row in place, accordion-style, in
+place of a separate large chart. It needs no explaining, but the row clicked moves away
+from under the pointer when the row above it closes, which makes stepping through
+metrics a chase; the large chart also stops being where the eye left it.
+
+Still open: the fight-heat scale (damage per metal of income, full at 8) is a guess to
+revisit with real games.
 
 ## 6. Testing
 
