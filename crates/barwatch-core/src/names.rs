@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_lobby_names_and_strips_script_syntax() {
-        assert_eq!(sanitize("[gecko]u6bkep"), "[gecko]u6bkep");
+        assert_eq!(sanitize("[clan]Sorrel"), "[clan]Sorrel");
         assert_eq!(sanitize(" two words "), "two_words");
         assert_eq!(sanitize("a;b}c=d"), "a_b_c_d");
         assert_eq!(sanitize("[[x]]"), "[x]");
