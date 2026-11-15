@@ -6,7 +6,7 @@ use crate::client::{self, Settings};
 use crate::mapimg::{self, Picture};
 use crate::replays::{self, LocalReplay};
 use barwatch_core::maps::MapIndex;
-use damascene_winit_wgpu::Wakeup;
+use barwatch_host::Wakeup;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};

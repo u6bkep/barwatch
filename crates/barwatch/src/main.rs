@@ -107,7 +107,7 @@ fn main() -> Result<()> {
             let opts =
                 timeline::ProtoOptions { start_s: at, sample_markers, data_root: data.root, game_art, computed_to, paused };
             let proto = timeline::Proto::open(&replay, opts)?;
-            damascene_winit_wgpu::run("barwatch timeline (prototype)", Rect::new(0.0, 0.0, 1180.0, 900.0), proto)
+            barwatch_host::run_host_app("barwatch timeline (prototype)", Rect::new(0.0, 0.0, 1180.0, 900.0), proto)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
         None => run_window(cfg, data, cli.link),
@@ -122,7 +122,7 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
     if let Ok(scene) = std::env::var("BARWATCH_FIXTURE") {
         let ui = fixtures::scene(&scene)
             .with_context(|| format!("unknown fixture {scene:?}; known: {}", fixtures::SCENES.join(", ")))?;
-        return damascene_winit_wgpu::run("barwatch", viewport, ui).map_err(|e| anyhow::anyhow!("{e}"));
+        return barwatch_host::run_host_app("barwatch", viewport, ui).map_err(|e| anyhow::anyhow!("{e}"));
     }
 
     // One window per user: a link opened while it is up goes to that window.
@@ -147,10 +147,10 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
     let (backend, to_window) = backend::Backend::spawn(wake.clone());
     let _listening = instance::listen(move |link| to_window.post(backend::Msg::Opened(link)));
     let ui = ui::Ui::new(backend, cfg, data, opened);
-    let host = damascene_winit_wgpu::HostConfig::default()
+    let host = barwatch_host::HostConfig::default()
         .with_app_id("barwatch")
         .with_external_wakeup(move |wakeup| *wake.lock().unwrap() = Some(wakeup));
-    damascene_winit_wgpu::run_with_config("barwatch", viewport, ui, host).map_err(|e| anyhow::anyhow!("{e}"))
+    barwatch_host::run_host_app_with_config("barwatch", viewport, ui, host).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// `barwatch join`: the session client driven from a terminal.

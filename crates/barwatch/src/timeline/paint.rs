@@ -319,7 +319,11 @@ pub fn class_sign(class: super::marks::MarkClass, size: f32) -> El {
     let mut paths = vec![disc(c, Color::srgb_u8a(0, 0, 0, 204)), disc(c - 1.0, class.color())];
     match class {
         MarkClass::Built => paths.extend([line(c - arm, c, c + arm, c), line(c, c - arm, c, c + arm)]),
-        MarkClass::Tech => paths.extend([line(c, c + arm, c, c - arm), line(c - arm * 0.8, c - arm * 0.1, c, c - arm), line(c + arm * 0.8, c - arm * 0.1, c, c - arm)]),
+        MarkClass::Tech => paths.extend([
+            line(c, c + arm, c, c - arm),
+            line(c - arm * 0.8, c - arm * 0.1, c, c - arm),
+            line(c + arm * 0.8, c - arm * 0.1, c, c - arm),
+        ]),
         MarkClass::Attack => {
             let a = arm * 0.8;
             paths.extend([line(c - a, c - a, c + a, c + a), line(c - a, c + a, c + a, c - a)])

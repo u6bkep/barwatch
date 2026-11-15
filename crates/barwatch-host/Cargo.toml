@@ -1,0 +1,84 @@
+# A copy of damascene-winit-wgpu 0.9.0 (crates.io; upstream commit 278ad7c9,
+# https://github.com/computer-whisperer/damascene, crates/damascene-winit-wgpu),
+# changed for barwatch. See README.md for what was changed and why.
+[package]
+name = "barwatch-host"
+description = "barwatch's window host: damascene-winit-wgpu 0.9.0, copied and changed to report the pointer position"
+version.workspace = true
+# The copied source is written for the 2024 edition; the rest of the workspace is 2021.
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+authors = ["Christian Balcom <robot.inventor@gmail.com>", "the barwatch authors"]
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+damascene-core = { version = "0.9.0", default-features = false }
+damascene-wgpu = "0.9.0"
+damascene-winit = "0.9.0"
+log = "0.4"
+pollster = "1.0"
+wgpu = "30"
+png = "0.18"
+winit = { version = "0.30", features = ["android-native-activity"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+accesskit_winit = { version = "0.34.1", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.5"
+block2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "block2",
+    "NSDictionary",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSOperation",
+    "NSString",
+    "NSValue",
+] }
+objc2-ui-kit = { version = "0.2", features = ["UIGeometry", "UIResponder", "UIView", "UIWindow"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
+open = "5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "staging"], optional = true }
+wayland-sys = { version = "0.31", features = ["client"], optional = true }
+dlib = { version = "0.5", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+accesskit_android = { version = "0.9.0", features = ["embedded-dex"], optional = true }
+
+[features]
+default = ["default_fonts", "wayland-color-management", "accessibility"]
+accessibility = [
+    "damascene-wgpu/accessibility",
+    "dep:accesskit_winit",
+    "dep:accesskit_android",
+]
+default_fonts = ["damascene-core/default_fonts"]
+inter = ["damascene-core/inter"]
+jetbrains-mono = ["damascene-core/jetbrains-mono"]
+roboto = ["damascene-core/roboto"]
+emoji = ["damascene-core/emoji"]
+symbols = ["damascene-core/symbols"]
+profiling = ["damascene-core/profiling", "damascene-wgpu/profiling"]
+wayland-color-management = [
+    "dep:wayland-backend",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-sys",
+    "dep:dlib",
+    "dep:raw-window-handle",
+]
