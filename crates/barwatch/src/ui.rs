@@ -36,6 +36,8 @@ pub struct Ui {
     tab: String,
     selection: Selection,
     toasts: Vec<ToastSpec>,
+    /// Keys to move keyboard focus to on the next frame.
+    focus_requests: Vec<String>,
     clipboard: Option<arboard::Clipboard>,
 
     /// The invite link being typed or pasted.
@@ -74,6 +76,7 @@ impl Ui {
             tab: TAB_PARTY.into(),
             selection: Selection::default(),
             toasts: Vec::new(),
+            focus_requests: Vec::new(),
             clipboard: None,
             link: String::new(),
             party: None,
@@ -320,6 +323,10 @@ impl App for Ui {
         std::mem::take(&mut self.toasts)
     }
 
+    fn drain_focus_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.focus_requests)
+    }
+
     fn on_event(&mut self, event: UiEvent, _cx: &EventCx) {
         if event.kind == UiEventKind::SelectionChanged {
             if let Some(sel) = event.selection.as_ref() {
@@ -328,6 +335,10 @@ impl App for Ui {
             return;
         }
         if tabs::apply_event(&mut self.tab, &event, "tab", |s| Some(s.to_owned())) {
+            return;
+        }
+        if let Some(target) = tab_out_of_field(&event) {
+            self.focus_requests.push(target.to_owned());
             return;
         }
 
@@ -411,6 +422,28 @@ impl App for Ui {
             self.refilter();
         }
     }
+}
+
+/// A focused text field receives Tab as a raw key instead of giving up focus, so
+/// the fields hand focus to their neighbours here: (field, previous, next).
+const FIELD_NEIGHBOURS: [(&str, &str, &str); 4] = [
+    ("link", "tab:tab:settings", "join"),
+    ("filter", "tab:tab:settings", "replays:refresh"),
+    ("name", "tab:tab:settings", "data-dir"),
+    ("data-dir", "name", "settings:detect"),
+];
+
+/// Where focus goes when `event` is Tab or Shift+Tab pressed in a text field.
+fn tab_out_of_field(event: &UiEvent) -> Option<&'static str> {
+    if event.kind != UiEventKind::KeyDown {
+        return None;
+    }
+    let press = event.key_press.as_ref()?;
+    if press.logical.named() != Some(NamedKey::Tab) {
+        return None;
+    }
+    let (_, previous, next) = FIELD_NEIGHBOURS.iter().find(|(field, _, _)| event.is_route(field))?;
+    Some(if press.modifiers.shift { previous } else { next })
 }
 
 fn consent_dialog(link: &Link) -> El {
@@ -753,4 +786,28 @@ fn viewers_card(session: &SessionView, me: &str) -> El {
         })
         .collect();
     titled_card(format!("Viewers ({})", session.viewers.len()), [item_group(rows)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_leaves_text_fields() {
+        let tab = |key: &str| UiEvent::synthetic_key_down(key, LogicalKey::Named(NamedKey::Tab));
+        assert_eq!(tab_out_of_field(&tab("filter")), Some("replays:refresh"));
+        assert_eq!(tab_out_of_field(&tab("data-dir")), Some("settings:detect"));
+        assert_eq!(tab_out_of_field(&tab("join")), None);
+        let enter = UiEvent::synthetic_key_down("filter", LogicalKey::Named(NamedKey::Enter));
+        assert_eq!(tab_out_of_field(&enter), None);
+    }
+
+    #[test]
+    fn display_helpers() {
+        assert_eq!(clock(834), "13:54");
+        assert_eq!(clock(3723), "1:02:03");
+        let info = ReplayInfo { teams: vec![vec!["a".into(), "b".into()], vec!["c".into()]], ..Default::default() };
+        assert_eq!(versus(&info), "a, b  vs  c");
+        assert_eq!(versus(&ReplayInfo::default()), "no players");
+    }
 }
