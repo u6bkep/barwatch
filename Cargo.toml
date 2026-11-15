@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/barwatch-core", "crates/barwatchd", "crates/barwatch"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/u6bkep/barwatch"
+rust-version = "1.89"
+
+[workspace.dependencies]
+barwatch-core = { path = "crates/barwatch-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "fs", "time", "sync", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = "0.3"
+url = "2"
+clap = { version = "4", features = ["derive", "env"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 4
+
+# Optimize damascene's text rasterization/shaping stack in dev builds (see the
+# damascene README: MSDF glyph generation is ~500x slower at opt-level 0).
+[profile.dev.package.fdsm]
+opt-level = 3
+[profile.dev.package.fdsm-ttf-parser]
+opt-level = 3
+[profile.dev.package.nalgebra]
+opt-level = 3
+[profile.dev.package.simba]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.ttf-parser]
+opt-level = 3
+[profile.dev.package.cosmic-text]
+opt-level = 3
+[profile.dev.package.swash]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.zeno]
+opt-level = 3
+[profile.dev.package.fontdb]
+opt-level = 3

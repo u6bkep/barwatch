@@ -1,0 +1,19 @@
+[package]
+name = "barwatch"
+description = "Watch a Beyond All Reason replay together: desktop app that joins a barwatch server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+barwatch-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+url.workspace = true
+clap.workspace = true
+dirs = "6"

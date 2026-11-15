@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>barwatch</title>
+<style>{{STYLE}}</style>
+</head>
+<body>
+<header>
+  <h1>barwatch</h1><small>watch Beyond All Reason replays together</small>
+  <span class="grow"></span>
+  <a href="{{DOWNLOAD_URL}}" target="_blank" rel="noopener">Get the desktop app</a>
+  <small>v{{VERSION}}</small>
+</header>
+<main>
+  <section class="card hidden" id="detail"></section>
+
+  <section class="card" id="create">
+    <h2>New watch party</h2>
+    <div class="drop" id="drop" tabindex="0" role="button">Drop a replay (.sdfz) here, or click to choose one</div>
+    <input type="file" id="file" accept=".sdfz" class="hidden">
+    <form class="row" id="bar-form" style="margin-top:12px">
+      <input type="text" id="bar-link" class="grow" placeholder="…or paste a replay link or id from the BAR website" autocomplete="off">
+      <button type="submit">Fetch</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Watch parties</h2>
+    <div class="sessions" id="sessions"></div>
+  </section>
+
+  <section class="card">
+    <h2>Desktop apps</h2>
+    <p class="muted">Pairing lets the desktop app on this computer start watch parties from the replays in its own folder. Joining never needs it.</p>
+    <div class="row"><button id="pair">Pair the desktop app on this computer</button></div>
+    <div class="viewers" id="tokens" style="margin-top:12px"></div>
+  </section>
+</main>
+<div id="toast" class="hidden"></div>
+<script>{{SCRIPT}}</script>
+</body>
+</html>
