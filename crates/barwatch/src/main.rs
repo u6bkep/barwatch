@@ -7,10 +7,15 @@
 // No console window behind the app on Windows.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod backend;
 mod client;
 mod config;
 mod content;
 mod datadir;
+mod fixtures;
+mod mapimg;
+mod replays;
+mod ui;
 mod uri;
 
 use anyhow::{bail, Context, Result};
@@ -74,8 +79,40 @@ fn main() -> Result<()> {
             let name = name.unwrap_or_else(|| if cfg.name.is_empty() { datadir::default_name(&data) } else { cfg.name.clone() });
             join_in_terminal(&link, client::Settings { name, data, headless })
         }
-        None => bail!("the window is not built yet; use `barwatch join <link>`"),
+        None => run_window(cfg, data, cli.link),
     }
+}
+
+/// Opens the window, on `link` if one was given (that is how a browser starts us).
+fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>) -> Result<()> {
+    use damascene_core::prelude::Rect;
+    let viewport = Rect::new(0.0, 0.0, 980.0, 700.0);
+    // A canned scene, for screenshots and layout review.
+    if let Ok(scene) = std::env::var("BARWATCH_FIXTURE") {
+        let ui = fixtures::scene(&scene)
+            .with_context(|| format!("unknown fixture {scene:?}; known: {}", fixtures::SCENES.join(", ")))?;
+        return damascene_winit_wgpu::run("barwatch", viewport, ui).map_err(|e| anyhow::anyhow!("{e}"));
+    }
+
+    let opened = link.and_then(|text| match Link::parse_any(&text) {
+        Ok(link) => Some(link),
+        Err(e) => {
+            eprintln!("ignoring {text:?}: {e:#}");
+            None
+        }
+    });
+    // First run of a bare binary: make links open it. A packaged install already is.
+    if uri::status() == uri::Status::Missing {
+        if let Err(e) = uri::register() {
+            eprintln!("could not register barwatch:// links: {e:#}");
+        }
+    }
+    let wake = backend::WakeSlot::default();
+    let ui = ui::Ui::new(backend::Backend::spawn(wake.clone()), cfg, data, opened);
+    let host = damascene_winit_wgpu::HostConfig::default()
+        .with_app_id("barwatch")
+        .with_external_wakeup(move |wakeup| *wake.lock().unwrap() = Some(wakeup));
+    damascene_winit_wgpu::run_with_config("barwatch", viewport, ui, host).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// `barwatch join`: the session client driven from a terminal.

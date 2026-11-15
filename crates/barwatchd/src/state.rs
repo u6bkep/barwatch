@@ -122,20 +122,10 @@ impl App {
     pub fn create_session(&self, file_name: &str, bytes: &[u8]) -> Result<Arc<Session>> {
         let demo = Demo::from_gz_bytes(bytes).context("this is not a readable replay")?;
         anyhow::ensure!(names::valid_engine_version(&demo.engine_version), "replay names an odd engine version");
-        let map = demo.map().context("replay does not name a map")?.to_owned();
-        let game = demo.game_version().context("replay does not name a game version")?.to_owned();
-        let roster = demo.roster();
-        let replay = ReplayInfo {
-            file_name: clean_file_name(file_name),
-            engine: demo.engine_version.clone(),
-            map_file: Some(self.maps.read().unwrap().file_name(&map)),
-            game,
-            map,
-            start_unix: demo.unix_time,
-            duration_s: demo.game_time_s,
-            teams: roster.teams,
-            spectators: roster.spectators,
-        };
+        let map = demo.map().context("replay does not name a map")?;
+        let map_file = self.maps.read().unwrap().file_name(map);
+        let replay = ReplayInfo::from_demo(&demo, &clean_file_name(file_name), Some(map_file))
+            .context("replay does not name a game version")?;
         let id = random_id(22);
         let dir = self.cfg.data.join("sessions").join(&id);
         std::fs::create_dir_all(&dir)?;

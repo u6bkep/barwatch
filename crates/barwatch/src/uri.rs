@@ -16,6 +16,7 @@ pub enum Status {
     /// Not registered, or registered for something else.
     Missing,
     /// This platform is not handled.
+    #[cfg_attr(any(target_os = "linux", windows), allow(dead_code))]
     Unsupported,
 }
 

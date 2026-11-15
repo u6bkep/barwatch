@@ -35,6 +35,24 @@ pub struct ReplayInfo {
     pub spectators: Vec<String>,
 }
 
+impl ReplayInfo {
+    /// Describes a parsed replay. `None` if it names no map or game version.
+    pub fn from_demo(demo: &crate::demo::Demo, file_name: &str, map_file: Option<String>) -> Option<ReplayInfo> {
+        let roster = demo.roster();
+        Some(ReplayInfo {
+            file_name: file_name.to_owned(),
+            engine: demo.engine_version.clone(),
+            game: demo.game_version()?.to_owned(),
+            map: demo.map()?.to_owned(),
+            map_file,
+            start_unix: demo.unix_time,
+            duration_s: demo.game_time_s,
+            teams: roster.teams,
+            spectators: roster.spectators,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
