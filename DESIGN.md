@@ -255,8 +255,9 @@ Built (T1). `crates/barwatch-host` is `damascene-winit-wgpu` 0.9.0, copied (MIT 
 Apache-2.0, its licence files kept; `crates/barwatch-host/README.md` lists every
 difference). The one change in behaviour: `WinitWgpuApp::pointer_moved(position, cx) ->
 bool`, called on every cursor move with the position in logical px (`None` when the
-pointer leaves the window), after the events that move caused; `true` asks for a frame.
-The default does nothing. An app that wants it implements `WinitWgpuApp` and starts
+pointer leaves the window), after the events that move caused; `true` asks for a frame,
+and that frame is always built (upstream's loop can turn a pointer-triggered frame into
+a paint-only one while a time-driven shader is on screen). The default does nothing. An app that wants it implements `WinitWgpuApp` and starts
 through `run_host_app` / `run_host_app_with_config`: `Proto` passes it to
 `Timeline::pointer_moved`, `Ui` keeps the default. `damascene-core` is untouched.
 
@@ -275,7 +276,9 @@ What the timeline does with it:
   row and a player row light up, the jump button brightens and gains a rim.
 
 The timeline learns which track is under the pointer from `BuildCx::hovered_key`, so
-anything drawn over the tracks hides the hover line with no extra bookkeeping.
+anything drawn over the tracks hides the hover line with no extra bookkeeping. That
+key changes only when the pointer moves: content scrolled under a resting pointer
+keeps the old track's readout until the next move.
 
 ### 5.6 Pictures from the installed game
 
