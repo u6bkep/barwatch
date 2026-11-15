@@ -18,10 +18,11 @@ struct MapList {
 
 #[derive(Deserialize)]
 struct MapEntry {
+    // Either can be null for maps the API knows only by name.
     #[serde(rename = "scriptName")]
-    script_name: String,
+    script_name: Option<String>,
     #[serde(rename = "fileName")]
-    file_name: String,
+    file_name: Option<String>,
 }
 
 /// In-game map name → archive base name.
@@ -69,7 +70,11 @@ impl MapIndex {
     pub fn parse(json: &str) -> Result<MapIndex> {
         let list: MapList = serde_json::from_str(json).context("parsing the map list")?;
         Ok(MapIndex {
-            by_name: list.data.into_iter().map(|m| (m.script_name.to_lowercase(), m.file_name)).collect(),
+            by_name: list
+                .data
+                .into_iter()
+                .filter_map(|m| Some((m.script_name?.to_lowercase(), m.file_name?)))
+                .collect(),
         })
     }
 
@@ -112,11 +117,13 @@ mod tests {
     #[test]
     fn resolves_listed_maps_and_guesses_the_rest() {
         let index = MapIndex::parse(
-            r#"{"totalResults":1,"data":[{"id":1,"scriptName":"Supreme Isthmus v2.1","fileName":"supreme_isthmus_v2.1","width":24}]}"#,
+            r#"{"totalResults":2,"data":[{"id":1,"scriptName":"Supreme Isthmus v2.1","fileName":"supreme_isthmus_v2.1","width":24},
+                {"id":2,"scriptName":"Nameless","fileName":null}]}"#,
         )
         .unwrap();
         assert_eq!(index.file_name("supreme isthmus V2.1"), "supreme_isthmus_v2.1");
         assert_eq!(index.file_name("Comet Catcher Remake 1.8"), "comet_catcher_remake_1.8");
+        assert_eq!(index.file_name("Nameless"), "nameless");
     }
 
     #[test]

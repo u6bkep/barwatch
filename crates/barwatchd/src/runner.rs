@@ -30,12 +30,12 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const EMPTY_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long the server gets to exit after `/kill` before it is killed.
 const KILL_GRACE: Duration = Duration::from_secs(5);
-/// Wait between the replay stream beginning and skipping its recorded lobby wait.
-/// The engine's skip never returns if it runs before the server has consumed the
-/// first chunk of the recording, which it does about 0.1 s into playback
-/// (`CGameServer::SkipTo` advances to the next chunk's own time, while
-/// `CDemoReader` holds the first chunk back until 0.09 s).
-const PREGAME_SKIP_DELAY: Duration = Duration::from_millis(1500);
+/// Unpaused playback time that must pass before any skip is sent. The engine's skip
+/// never returns if it runs before the server has consumed the first chunk of the
+/// recording, which it does 0.09 s of game time into playback (`CGameServer::SkipTo`
+/// advances to the next chunk's own time, while `CDemoReader` holds the first chunk
+/// back until then). 1.5 s is well past that even at the slowest speed.
+const SKIP_SAFE_AFTER: Duration = Duration::from_millis(1500);
 /// How long the engine itself waits for a first viewer. Longer than
 /// `EMPTY_TIMEOUT`, so it is barwatch that decides. The engine's default of 30 s is
 /// shorter than a viewer's first launch can take.
@@ -118,8 +118,11 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
     let mut listening = false;
     let mut last_presence = Instant::now();
     let mut stopping: Option<(Instant, String)> = None;
-    let mut pregame_skip_at: Option<Instant> = None;
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    // Unpaused time since the replay stream began; `None` before it has.
+    let mut played: Option<Duration> = None;
+    let mut pregame_skipped = false;
+    let tick_every = Duration::from_millis(250);
+    let mut tick = tokio::time::interval(tick_every);
     let mut buf = vec![0u8; 65536];
 
     loop {
@@ -147,9 +150,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                         });
                     }
                     Some(Event::Message(text)) => match Notice::parse(&text) {
-                        // The recording opens with the original lobby wait; nobody
-                        // wants to sit through it again.
-                        Some(Notice::PlaybackBegan) => pregame_skip_at = Some(Instant::now() + PREGAME_SKIP_DELAY),
+                        Some(Notice::PlaybackBegan) => played = Some(Duration::ZERO),
                         Some(Notice::Paused(p)) => session.mutate(|st| st.paused = p),
                         Some(Notice::ReplayEnded) => session.mutate(|st| st.ended = true),
                         None => {}
@@ -162,7 +163,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                     }),
                     Some(Event::Chat { text, .. }) => match chat::parse(&text) {
                         Some(Ok(Command::Control(control))) => {
-                            let reply = apply(&link, session, control).await;
+                            let reply = apply(&link, session, control, pregame_skipped).await;
                             link.send(&reply).await;
                         }
                         Some(Ok(Command::Help)) => link.send(chat::HELP).await,
@@ -174,7 +175,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             }
             cmd = cmds.recv() => match cmd {
                 Some(RunnerCmd::Control(control)) => {
-                    let reply = apply(&link, session, control).await;
+                    let reply = apply(&link, session, control, pregame_skipped).await;
                     link.send(&reply).await;
                 }
                 Some(RunnerCmd::Stop) | None => {
@@ -182,9 +183,16 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                 }
             },
             _ = tick.tick() => {
-                if pregame_skip_at.is_some_and(|at| Instant::now() >= at) {
-                    pregame_skip_at = None;
-                    link.send("/skip 1").await;
+                if let Some(time) = &mut played {
+                    if !session.read(|st| st.paused) {
+                        *time += tick_every;
+                    }
+                    // The recording opens with the original lobby wait; nobody wants
+                    // to sit through it again.
+                    if !pregame_skipped && *time >= SKIP_SAFE_AFTER {
+                        pregame_skipped = true;
+                        link.send("/skip 1").await;
+                    }
                 }
                 if !listening && launched.elapsed() > START_TIMEOUT {
                     let _ = child.start_kill();
@@ -232,8 +240,9 @@ async fn begin_stop(link: &Link, child: &mut tokio::process::Child, stopping: &m
 }
 
 /// Carries out a playback command; returns the line to announce in game chat.
-async fn apply(link: &Link, session: &Session, control: Control) -> String {
+async fn apply(link: &Link, session: &Session, control: Control, skips_safe: bool) -> String {
     match control {
+        Control::Skip { .. } if !skips_safe => "barwatch: the replay is only just starting; try again in a moment".into(),
         Control::Skip { seconds, relative } => {
             // Exact on the server; each viewer's engine then replays the gap as fast
             // as it can. A target already passed is ignored by the engine.
