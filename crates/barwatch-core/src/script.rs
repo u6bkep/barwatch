@@ -120,8 +120,8 @@ pub fn join_script(host: &str, port: u16, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::demo::tests::SETUP;
     use crate::demo::parse_script;
+    use crate::demo::tests::SETUP;
 
     fn game_data() -> GameData {
         GameData { setup_text: SETUP.to_string(), map_hash: [0xab; 64], mod_hash: [0xcd; 64], random_seed: 42 }
@@ -159,10 +159,7 @@ mod tests {
 
     #[test]
     fn hosting_script_handles_brace_on_header_line() {
-        let gd = GameData {
-            setup_text: "[GAME] {\n[PLAYER0] {\nName=A;\n}\nHostIP=x;\nMapName=M;\n}\n".into(),
-            ..game_data()
-        };
+        let gd = GameData { setup_text: "[GAME] {\n[PLAYER0] {\nName=A;\n}\nHostIP=x;\nMapName=M;\n}\n".into(), ..game_data() };
         let v = parse_script(&dedicated_script(&gd, Path::new("/d.sdfz"), 1, 2)).unwrap();
         assert_eq!(v["game"]["hostip"], "");
         assert_eq!(v["game"]["player0"]["isfromdemo"], "1");

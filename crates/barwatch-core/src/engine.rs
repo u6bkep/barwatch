@@ -59,10 +59,7 @@ impl Binary {
 
     /// Path of this executable in `engine_dir`, if it is there.
     pub fn find(self, engine_dir: &Path) -> Option<PathBuf> {
-        [format!("{}.exe", self.stem()), self.stem().to_string()]
-            .into_iter()
-            .map(|n| engine_dir.join(n))
-            .find(|p| p.is_file())
+        [format!("{}.exe", self.stem()), self.stem().to_string()].into_iter().map(|n| engine_dir.join(n)).find(|p| p.is_file())
     }
 }
 
@@ -80,9 +77,7 @@ fn engine_urls(version: &str, os: Os) -> Vec<String> {
     let os = os.tag();
     if let Some((v, branch)) = version.split_once(' ') {
         // Spring 105 BAR branch builds, e.g. "105.1.1-2590-gb9462a0 BAR105".
-        return vec![format!(
-            "{RELEASES}/spring_bar_%7B{branch}%7D{v}/spring_bar_.{branch}.{v}_{os}-64-minimal-portable.7z"
-        )];
+        return vec![format!("{RELEASES}/spring_bar_%7B{branch}%7D{v}/spring_bar_.{branch}.{v}_{os}-64-minimal-portable.7z")];
     }
     vec![
         format!("{RELEASES}/{version}/recoil_{version}_amd64-{os}.7z"),
@@ -260,8 +255,9 @@ mod tests {
             engine_urls("2026.07.04", Os::Windows)[0],
             "https://github.com/beyond-all-reason/RecoilEngine/releases/download/2026.07.04/recoil_2026.07.04_amd64-windows.7z"
         );
-        assert!(engine_urls("105.1.1-2590-gb9462a0 BAR105", Os::Linux)[0]
-            .ends_with("spring_bar_%7BBAR105%7D105.1.1-2590-gb9462a0/spring_bar_.BAR105.105.1.1-2590-gb9462a0_linux-64-minimal-portable.7z"));
+        assert!(engine_urls("105.1.1-2590-gb9462a0 BAR105", Os::Linux)[0].ends_with(
+            "spring_bar_%7BBAR105%7D105.1.1-2590-gb9462a0/spring_bar_.BAR105.105.1.1-2590-gb9462a0_linux-64-minimal-portable.7z"
+        ));
     }
 
     #[test]

@@ -28,10 +28,7 @@ fn config_file() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Config {
-        config_file()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        config_file().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<()> {

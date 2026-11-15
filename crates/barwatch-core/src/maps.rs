@@ -51,40 +51,26 @@ impl MapIndex {
                 }
             }
         }
-        std::fs::read_to_string(cache_file)
-            .ok()
-            .and_then(|t| Self::parse(&t).ok())
-            .unwrap_or_default()
+        std::fs::read_to_string(cache_file).ok().and_then(|t| Self::parse(&t).ok()).unwrap_or_default()
     }
 
     async fn fetch(http: &reqwest::Client) -> Result<String> {
-        let resp = http
-            .get(format!("{MAPS_URL}?limit=5000"))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp =
+            http.get(format!("{MAPS_URL}?limit=5000")).timeout(Duration::from_secs(30)).send().await?.error_for_status()?;
         Ok(resp.text().await?)
     }
 
     pub fn parse(json: &str) -> Result<MapIndex> {
         let list: MapList = serde_json::from_str(json).context("parsing the map list")?;
         Ok(MapIndex {
-            by_name: list
-                .data
-                .into_iter()
-                .filter_map(|m| Some((m.script_name?.to_lowercase(), m.file_name?)))
-                .collect(),
+            by_name: list.data.into_iter().filter_map(|m| Some((m.script_name?.to_lowercase(), m.file_name?))).collect(),
         })
     }
 
     /// Archive base name for an in-game map name. Unknown maps get the usual naming
     /// convention as a guess; the picture request simply fails if it is wrong.
     pub fn file_name(&self, map: &str) -> String {
-        self.by_name
-            .get(&map.to_lowercase())
-            .cloned()
-            .unwrap_or_else(|| map.to_lowercase().replace(' ', "_"))
+        self.by_name.get(&map.to_lowercase()).cloned().unwrap_or_else(|| map.to_lowercase().replace(' ', "_"))
     }
 
     pub fn is_empty(&self) -> bool {

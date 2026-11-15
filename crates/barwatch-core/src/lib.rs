@@ -12,8 +12,5 @@ pub mod script;
 pub const USER_AGENT: &str = concat!("barwatch/", env!("CARGO_PKG_VERSION"));
 
 pub fn http_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .build()?)
+    Ok(reqwest::Client::builder().user_agent(USER_AGENT).connect_timeout(std::time::Duration::from_secs(20)).build()?)
 }

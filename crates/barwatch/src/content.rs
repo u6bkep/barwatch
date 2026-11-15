@@ -18,9 +18,7 @@ pub async fn ensure_map(engine_dir: &Path, data_root: &Path, map: &str) -> Resul
 async fn run(engine_dir: &Path, data_root: &Path, flag: &str, name: &str, timeout: Duration) -> Result<()> {
     // `name` comes from the server; it must not be taken for an option.
     ensure!(names::valid_content_name(name), "refusing to download {name:?}");
-    let prd = Binary::PrDownloader
-        .find(engine_dir)
-        .with_context(|| format!("no pr-downloader in {}", engine_dir.display()))?;
+    let prd = Binary::PrDownloader.find(engine_dir).with_context(|| format!("no pr-downloader in {}", engine_dir.display()))?;
     let mut cmd = tokio::process::Command::new(&prd);
     cmd.current_dir(engine_dir)
         .env("PRD_RAPID_USE_STREAMER", "false")

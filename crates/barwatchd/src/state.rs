@@ -333,7 +333,12 @@ impl Session {
         // Engines that connected without going through the app.
         for name in st.in_game.values() {
             if !st.viewers.iter().any(|v| &v.name == name) {
-                viewers.push(ViewerView { name: name.clone(), state: ViewerState::Playing, detail: String::new(), in_game: true });
+                viewers.push(ViewerView {
+                    name: name.clone(),
+                    state: ViewerState::Playing,
+                    detail: String::new(),
+                    in_game: true,
+                });
             }
         }
         SessionView {

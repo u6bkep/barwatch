@@ -8,8 +8,7 @@ use crate::content;
 use crate::datadir::DataDir;
 use anyhow::{bail, ensure, Context, Result};
 use barwatch_core::api::{
-    self, ApiError, Created, JoinRequest, JoinResponse, Phase, ServerInfo, SessionView, ViewerState, ViewerUpdate,
-    API_VERSION,
+    self, ApiError, Created, JoinRequest, JoinResponse, Phase, ServerInfo, SessionView, ViewerState, ViewerUpdate, API_VERSION,
 };
 use barwatch_core::engine::{self, Binary, Os};
 use barwatch_core::{names, script};
@@ -33,7 +32,10 @@ pub struct Settings {
 pub enum Stage {
     Connecting,
     /// Installing the engine, game version or map.
-    Preparing { what: String, fraction: Option<f32> },
+    Preparing {
+        what: String,
+        fraction: Option<f32>,
+    },
     /// Everything is installed; the engine starts as soon as the party runs.
     Ready,
     /// The engine is running.
@@ -64,7 +66,7 @@ pub enum Command {
 }
 
 enum Internal {
-    Session(SessionView),
+    Session(Box<SessionView>),
     Gone,
     Progress(String, Option<f32>),
     Provisioned(Result<PathBuf, String>),
@@ -127,7 +129,7 @@ pub async fn run(
     loop {
         tokio::select! {
             Some(event) = events.recv() => match event {
-                Internal::Session(view) => update.session = Some(view),
+                Internal::Session(view) => update.session = Some(*view),
                 Internal::Gone => {
                     update.stage = Stage::Failed("This watch party no longer exists.".into());
                     notify(update.clone());
@@ -240,9 +242,10 @@ impl Client {
     }
 
     async fn register(&self) -> Result<JoinResponse> {
-        let info: ServerInfo = read(self.http.get(api::app_url(&self.server, "info")?).timeout(Duration::from_secs(20)).send().await)
-            .await
-            .context("reaching the server")?;
+        let info: ServerInfo =
+            read(self.http.get(api::app_url(&self.server, "info")?).timeout(Duration::from_secs(20)).send().await)
+                .await
+                .context("reaching the server")?;
         ensure!(
             info.api == API_VERSION,
             "the server (version {}) and this app ({}) do not match; update the older one",
@@ -269,7 +272,8 @@ impl Client {
     }
 
     async fn start(&self) -> Result<()> {
-        let _: SessionView = read(self.http.post(self.session_url("/start")).timeout(Duration::from_secs(20)).send().await).await?;
+        let _: SessionView =
+            read(self.http.post(self.session_url("/start")).timeout(Duration::from_secs(20)).send().await).await?;
         Ok(())
     }
 
@@ -338,7 +342,7 @@ async fn follow(http: reqwest::Client, url: Url, mut rev: u64, tx: mpsc::Unbound
             Ok(r) if r.status().is_success() => match r.json::<SessionView>().await {
                 Ok(view) => {
                     rev = view.rev;
-                    if tx.send(Internal::Session(view)).is_err() {
+                    if tx.send(Internal::Session(Box::new(view))).is_err() {
                         return;
                     }
                 }

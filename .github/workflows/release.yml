@@ -1,0 +1,113 @@
+name: release
+
+# A tag like v0.2.0 publishes: the Windows app, Linux binaries, and the server image
+# on the GitHub container registry.
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  WIN_TARGET: x86_64-pc-windows-gnu
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE=true; else PRERELEASE=false; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          CRATE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$CRATE" != "$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $CRATE" >&2
+            exit 1
+          fi
+
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mingw-w64 zip
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - name: Build Linux binaries
+        run: cargo build --release --locked -p barwatch -p barwatchd
+
+      - name: Build Windows app (cross-compiled)
+        run: cargo build --release --locked --target "$WIN_TARGET" -p barwatch
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          OUT="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$OUT"
+
+          # Windows: the bare program. It is all there is to download and run.
+          cp "target/$WIN_TARGET/release/barwatch.exe" "$OUT/barwatch-$VERSION-windows-x86_64.exe"
+
+          STAGE="$(mktemp -d)/barwatch-$VERSION-linux-x86_64"
+          mkdir -p "$STAGE"
+          cp target/release/barwatch target/release/barwatchd "$STAGE/"
+          cp README.md LICENSE-MIT LICENSE-APACHE packaging/barwatch.desktop packaging/barwatch.svg "$STAGE/"
+          tar -C "$(dirname "$STAGE")" -czf "$OUT/barwatch-$VERSION-linux-x86_64.tar.gz" "$(basename "$STAGE")"
+
+          (cd "$OUT" && sha256sum * > SHA256SUMS)
+          ls -la "$OUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+
+  image:
+    name: Build and push the server image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

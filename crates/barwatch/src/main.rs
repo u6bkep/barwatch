@@ -62,7 +62,7 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Cmd::Register) => {
             uri::register()?;
-            println!("barwatch:// links now open {}", std::env::current_exe()?.display());
+            println!("barwatch:// links now open barwatch");
             Ok(())
         }
         Some(Cmd::Unregister) => uri::unregister(),

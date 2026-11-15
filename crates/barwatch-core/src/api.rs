@@ -144,9 +144,16 @@ pub struct Created {
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum Control {
     /// Jump forward: to an absolute game time, or by `seconds` from here.
-    Skip { seconds: u32, relative: bool },
-    Pause { paused: bool },
-    Speed { speed: f32 },
+    Skip {
+        seconds: u32,
+        relative: bool,
+    },
+    Pause {
+        paused: bool,
+    },
+    Speed {
+        speed: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,10 +175,7 @@ impl Link {
         let url = Url::parse(text.trim()).context("not a link")?;
         ensure!(url.scheme() == "barwatch", "not a barwatch:// link");
         let param = |key: &str| -> Result<String> {
-            url.query_pairs()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.into_owned())
-                .with_context(|| format!("link has no '{key}'"))
+            url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned()).with_context(|| format!("link has no '{key}'"))
         };
         let server = parse_server(&param("server")?)?;
         match url.host_str() {
@@ -197,11 +201,8 @@ impl Link {
             return Link::parse(text);
         }
         let url = Url::parse(text).context("not a link")?;
-        let (prefix, session) = url
-            .path()
-            .trim_end_matches('/')
-            .rsplit_once("/app/join/")
-            .context("this is not a barwatch invite link")?;
+        let (prefix, session) =
+            url.path().trim_end_matches('/').rsplit_once("/app/join/").context("this is not a barwatch invite link")?;
         ensure!(names::valid_id(session), "malformed session id");
         let mut server = url.clone();
         server.set_path(prefix);
@@ -263,18 +264,13 @@ mod tests {
 
     #[test]
     fn links_round_trip() {
-        let join = Link::Join {
-            server: parse_server("https://bar.example.org").unwrap(),
-            session: "abcdefghijklmnopqrstuv".into(),
-        };
+        let join =
+            Link::Join { server: parse_server("https://bar.example.org").unwrap(), session: "abcdefghijklmnopqrstuv".into() };
         let text = join.to_string();
         assert_eq!(text, "barwatch://join?server=https%3A%2F%2Fbar.example.org%2F&session=abcdefghijklmnopqrstuv");
         assert_eq!(Link::parse(&text).unwrap(), join);
 
-        let pair = Link::Pair {
-            server: parse_server("http://10.0.0.5:8780/watch").unwrap(),
-            token: "T".repeat(32),
-        };
+        let pair = Link::Pair { server: parse_server("http://10.0.0.5:8780/watch").unwrap(), token: "T".repeat(32) };
         assert_eq!(Link::parse(&pair.to_string()).unwrap(), pair);
         assert_eq!(pair.server().as_str(), "http://10.0.0.5:8780/watch/");
     }

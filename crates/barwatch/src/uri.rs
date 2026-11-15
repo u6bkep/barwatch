@@ -135,11 +135,8 @@ mod imp {
             .open_subkey(format!(r"{KEY}\shell\open\command"))
             .and_then(|k| k.get_value::<String, _>(""))
             .ok();
-        let expected: Vec<String> = [std::env::current_exe().ok(), installed_path()]
-            .into_iter()
-            .flatten()
-            .map(|p| command_for(&p))
-            .collect();
+        let expected: Vec<String> =
+            [std::env::current_exe().ok(), installed_path()].into_iter().flatten().map(|p| command_for(&p)).collect();
         match registered {
             Some(cmd) if expected.iter().any(|e| e.eq_ignore_ascii_case(&cmd)) => Status::Registered,
             _ => Status::Missing,

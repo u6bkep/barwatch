@@ -44,15 +44,7 @@ const ENGINE_FIRST_VIEWER_WAIT_S: u32 = 600;
 /// Makes sure the engine for `session` is installed. Serialized across sessions.
 pub async fn ensure_engine(app: &App, session: &Session) -> Result<std::path::PathBuf> {
     let _guard = app.engine_lock.lock().await;
-    engine::ensure(
-        &app.http,
-        &app.engines_dir(),
-        &session.demo.engine_version,
-        Os::Linux,
-        Binary::Dedicated,
-        &|_, _| {},
-    )
-    .await
+    engine::ensure(&app.http, &app.engines_dir(), &session.demo.engine_version, Os::Linux, Binary::Dedicated, &|_, _| {}).await
 }
 
 /// Owns one run from launch to exit and leaves the session `Idle` (or `Failed`).

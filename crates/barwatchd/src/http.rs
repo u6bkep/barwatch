@@ -114,21 +114,20 @@ struct FromBar {
 /// Body: the replay file itself (name in `x-barwatch-filename`, percent-encoded), or
 /// JSON `{"bar_replay": "<id or link>"}` to fetch one from BAR's archive.
 async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Created>> {
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("application/json"));
+    let is_json =
+        headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("application/json"));
     let (name, bytes) = if is_json {
         let req: FromBar = serde_json::from_slice(&body).map_err(ApiErr::bad)?;
-        let (name, bytes) = source::fetch(&app.http, &req.bar_replay, app.cfg.max_upload)
-            .await
-            .map_err(|e| ApiErr::bad(format!("{e:#}")))?;
+        let (name, bytes) =
+            source::fetch(&app.http, &req.bar_replay, app.cfg.max_upload).await.map_err(|e| ApiErr::bad(format!("{e:#}")))?;
         (name, Bytes::from(bytes))
     } else {
         let name = headers
             .get("x-barwatch-filename")
             .and_then(|v| v.to_str().ok())
-            .map(|v| url::form_urlencoded::parse(format!("n={v}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default())
+            .map(|v| {
+                url::form_urlencoded::parse(format!("n={v}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
+            })
             .unwrap_or_default();
         (name, body)
     };
@@ -142,11 +141,8 @@ async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> 
 }
 
 async fn create_session_with_token(state: Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Created>> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
+    let token =
+        headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
     if !state.0.token_valid(token) {
         return Err(ApiErr(StatusCode::UNAUTHORIZED, "this app is not paired with the server (or was unpaired)".into()));
     }
@@ -200,7 +196,11 @@ async fn stop_session(State(app): Shared, Path(id): Path<String>) -> ApiResult<J
     Ok(Json(view(&app, &session)))
 }
 
-async fn control_session(State(app): Shared, Path(id): Path<String>, Json(control): Json<Control>) -> ApiResult<Json<SessionView>> {
+async fn control_session(
+    State(app): Shared,
+    Path(id): Path<String>,
+    Json(control): Json<Control>,
+) -> ApiResult<Json<SessionView>> {
     let session = find(&app, &id)?;
     if let Control::Speed { speed } = control {
         if !(crate::chat::MIN_SPEED..=crate::chat::MAX_SPEED).contains(&speed) {
@@ -272,7 +272,8 @@ struct PairResponse {
 }
 
 async fn pair(State(app): Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<PairResponse>> {
-    let req: PairRequest = if body.is_empty() { PairRequest::default() } else { serde_json::from_slice(&body).map_err(ApiErr::bad)? };
+    let req: PairRequest =
+        if body.is_empty() { PairRequest::default() } else { serde_json::from_slice(&body).map_err(ApiErr::bad)? };
     // A proxy that authenticates usually names the user; it makes a better label.
     let user = ["x-authentik-username", "x-forwarded-user", "remote-user"]
         .iter()
@@ -296,12 +297,7 @@ struct TokenView {
 }
 
 async fn list_tokens(State(app): Shared) -> Json<Vec<TokenView>> {
-    Json(
-        app.tokens()
-            .into_iter()
-            .map(|t| TokenView { id: t.id, label: t.label, created_unix: t.created_unix })
-            .collect(),
-    )
+    Json(app.tokens().into_iter().map(|t| TokenView { id: t.id, label: t.label, created_unix: t.created_unix }).collect())
 }
 
 async fn revoke_token(State(app): Shared, Path(id): Path<String>) -> ApiResult<StatusCode> {

@@ -67,9 +67,7 @@ pub fn valid_id(id: &str) -> bool {
 
 /// A host name or address a start script may name as the game server.
 pub fn valid_host(h: &str) -> bool {
-    !h.is_empty()
-        && h.len() <= 253
-        && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
+    !h.is_empty() && h.len() <= 253 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
 }
 
 #[cfg(test)]

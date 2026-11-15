@@ -27,14 +27,20 @@ pub enum Cmd {
 }
 
 pub enum Msg {
-    Session(client::Update),
+    Session(Box<client::Update>),
     /// The party joined last is over for this app (left, failed or gone).
     SessionEnded,
     /// The next batch of described replays, in list order.
     Replays(Vec<LocalReplay>),
     ScanDone,
-    MapImage { map: String, picture: Option<Picture> },
-    Created { server: Url, id: String },
+    MapImage {
+        map: String,
+        picture: Option<Picture>,
+    },
+    Created {
+        server: Url,
+        id: String,
+    },
     CreateFailed(String),
 }
 
@@ -69,11 +75,8 @@ impl Backend {
         std::thread::Builder::new()
             .name("barwatch-backend".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .expect("async runtime");
+                let runtime =
+                    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime");
                 runtime.block_on(work(command_rx, outbox));
             })
             .expect("backend thread");
@@ -125,7 +128,7 @@ async fn work(mut commands: async_mpsc::UnboundedReceiver<Cmd>, outbox: Outbox) 
                     let (notify, live) = (outbox.clone(), current.clone());
                     let on_update = move |update| {
                         if live.load(Ordering::SeqCst) == mine {
-                            notify.post(Msg::Session(update));
+                            notify.post(Msg::Session(Box::new(update)));
                         }
                     };
                     client::run(http, server, id, settings, rx, on_update).await;

@@ -107,9 +107,8 @@ impl Ui {
 
     fn refilter(&mut self) {
         let needle = self.filter.trim().to_lowercase();
-        let visible: Vec<usize> = (0..self.replays.len())
-            .filter(|&i| needle.is_empty() || self.haystacks[i].contains(&needle))
-            .collect();
+        let visible: Vec<usize> =
+            (0..self.replays.len()).filter(|&i| needle.is_empty() || self.haystacks[i].contains(&needle)).collect();
         self.visible = Arc::new(visible);
     }
 
@@ -174,7 +173,7 @@ impl Ui {
                     self.want_picture(&map);
                 }
                 if let Some(party) = &mut self.party {
-                    party.update = Some(update);
+                    party.update = Some(*update);
                 }
             }
             Msg::SessionEnded => {
@@ -307,7 +306,11 @@ impl App for Ui {
         };
         overlays(
             page([
-                tabs_list("tab", &self.tab, [(TAB_PARTY, "Watch party"), (TAB_REPLAYS, "My replays"), (TAB_SETTINGS, "Settings")]),
+                tabs_list(
+                    "tab",
+                    &self.tab,
+                    [(TAB_PARTY, "Watch party"), (TAB_REPLAYS, "My replays"), (TAB_SETTINGS, "Settings")],
+                ),
                 body,
             ])
             .gap(tokens::SPACE_4),
@@ -384,9 +387,8 @@ impl App for Ui {
                 self.creating = true;
                 self.backend.send(Cmd::Create { server, token, path });
             }
-        } else if let Some(index) = event
-            .route_index::<usize>("replay")
-            .filter(|_| matches!(event.kind, UiEventKind::Click | UiEventKind::Activate))
+        } else if let Some(index) =
+            event.route_index::<usize>("replay").filter(|_| matches!(event.kind, UiEventKind::Click | UiEventKind::Activate))
         {
             self.selected = Some(index);
             if let Some(map) = self.replays.get(index).and_then(|r| r.info.as_ref()).map(|i| i.map.clone()) {
@@ -404,9 +406,8 @@ impl App for Ui {
                 Err(e) => self.toasts.push(ToastSpec::error(format!("{e:#}"))),
             }
             self.link_status = uri::status();
-        } else if let Some(index) = event
-            .route_index::<usize>("unpair")
-            .filter(|_| matches!(event.kind, UiEventKind::Click | UiEventKind::Activate))
+        } else if let Some(index) =
+            event.route_index::<usize>("unpair").filter(|_| matches!(event.kind, UiEventKind::Click | UiEventKind::Activate))
         {
             if index < self.cfg.servers.len() {
                 self.cfg.servers.remove(index);
@@ -469,10 +470,7 @@ fn consent_dialog(link: &Link) -> El {
         "consent",
         [
             dialog_header([dialog_title(title), dialog_description(description)]),
-            dialog_footer([
-                button("Not now").key("consent:no").ghost(),
-                button(action).key("consent:yes").primary(),
-            ]),
+            dialog_footer([button("Not now").key("consent:no").ghost(), button(action).key("consent:yes").primary()]),
         ],
     )
 }
@@ -526,8 +524,13 @@ impl Ui {
                         card_description("Paste the invite link you were sent, or press the join button on the invite page."),
                     ]),
                     card_content([row([
-                        text_input_with("link", &self.link, &self.selection, TextInputOpts::default().placeholder("https://…/app/join/…"))
-                            .fill_width(),
+                        text_input_with(
+                            "link",
+                            &self.link,
+                            &self.selection,
+                            TextInputOpts::default().placeholder("https://…/app/join/…"),
+                        )
+                        .fill_width(),
                         button("Join").key("join").primary(),
                     ])
                     .gap(tokens::SPACE_2)]),
@@ -559,7 +562,8 @@ impl Ui {
         let mut buttons: Vec<El> = Vec::new();
         if !over && installed && matches!(phase, Some(Phase::Idle | Phase::Failed)) {
             let again = update.session.as_ref().is_some_and(|s| s.run > 0);
-            buttons.push(button(if again { "Start again for everyone" } else { "Start for everyone" }).key("party:start").primary());
+            buttons
+                .push(button(if again { "Start again for everyone" } else { "Start for everyone" }).key("party:start").primary());
         }
         if !over && update.stage == Stage::Closed && phase == Some(Phase::Running) {
             buttons.push(button("Rejoin").key("party:rejoin").primary());
@@ -609,8 +613,13 @@ impl Ui {
         };
 
         let toolbar_row = row([
-            text_input_with("filter", &self.filter, &self.selection, TextInputOpts::default().placeholder("Filter by map or player"))
-                .fill_width(),
+            text_input_with(
+                "filter",
+                &self.filter,
+                &self.selection,
+                TextInputOpts::default().placeholder("Filter by map or player"),
+            )
+            .fill_width(),
             text(format!("{count} of {}", self.replays.len())).caption().muted(),
             button("Refresh").key("replays:refresh").ghost(),
         ])
@@ -630,9 +639,12 @@ impl Ui {
             return card([card_content([text("Pick a replay to see what it is.").muted()]).pt(tokens::SPACE_5)]);
         };
         let Some(info) = &replay.info else {
-            return card([card_content([text(replay.file_name.clone()).wrap_text(), text("This file is not a readable replay.").muted()])
-                .pt(tokens::SPACE_5)
-                .gap(tokens::SPACE_2)]);
+            return card([card_content([
+                text(replay.file_name.clone()).wrap_text(),
+                text("This file is not a readable replay.").muted(),
+            ])
+            .pt(tokens::SPACE_5)
+            .gap(tokens::SPACE_2)]);
         };
         let mut body: Vec<El> = vec![
             self.picture(&info.map, 292.0),
@@ -670,23 +682,30 @@ impl Ui {
             format!("{engines} engine version(s) installed here. barwatch shares this folder with BAR, so neither downloads what the other already has.")
         };
         let servers: Vec<El> = if self.cfg.servers.is_empty() {
-            vec![text("None. Pairing is only needed to start watch parties from this app; joining never needs it.").muted().wrap_text()]
+            vec![text("None. Pairing is only needed to start watch parties from this app; joining never needs it.")
+                .muted()
+                .wrap_text()]
         } else {
             self.cfg
                 .servers
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    row([text(s.url.clone()).ellipsis().fill_width(), button("Unpair").key(format!("unpair:{i}")).ghost().destructive()])
-                        .gap(tokens::SPACE_2)
-                        .align(Align::Center)
+                    row([
+                        text(s.url.clone()).ellipsis().fill_width(),
+                        button("Unpair").key(format!("unpair:{i}")).ghost().destructive(),
+                    ])
+                    .gap(tokens::SPACE_2)
+                    .align(Align::Center)
                 })
                 .collect()
         };
         let (link_text, link_badge) = match self.link_status {
             uri::Status::Registered => ("barwatch:// links open this app.", badge("working").success()),
             uri::Status::Missing => ("barwatch:// links do not open this app yet.", badge("not set up").warning()),
-            uri::Status::Unsupported => ("Link handling is not supported on this system; paste invite links instead.", badge("unsupported").muted()),
+            uri::Status::Unsupported => {
+                ("Link handling is not supported on this system; paste invite links instead.", badge("unsupported").muted())
+            }
         };
         scroll([
             titled_card(
@@ -740,7 +759,11 @@ fn status_block(update: &client::Update, over: bool) -> El {
         Stage::Playing => alert([alert_title("The game is running"), alert_description(CHAT_HINT)]).success(),
         Stage::Closed => alert([
             alert_title("You closed the game"),
-            alert_description(if phase == Some(Phase::Running) { "The party is still going. Rejoin to get back in." } else { "The replay is not running right now." }),
+            alert_description(if phase == Some(Phase::Running) {
+                "The party is still going. Rejoin to get back in."
+            } else {
+                "The replay is not running right now."
+            }),
         ]),
         Stage::Ready => match phase {
             Some(Phase::Running | Phase::Starting) => busy("Starting the game…".into()),

@@ -1,88 +1,148 @@
 # barwatch
 
-Watch a Beyond All Reason replay together. One person hosts; everyone else joins and
-sees the same replay, in sync, with shared pause / speed / skip. The Recoil engine
-already supports this (a replay host accepts extra spectators); `barwatch` just does
-the coordination: matching engine version, game version and map on every machine,
-avoiding player-name clashes, and launching the engine on each side at the right moment.
+Watch a [Beyond All Reason](https://www.beyondallreason.info/) replay together. A
+server hosts the replay; everyone who joins sees the same game, in sync, with shared
+pause, speed and jump-ahead. Viewers join from a link.
 
-## Usage
+Two parts:
 
-Host (has the replay file):
+- **`barwatchd`**, the server. It runs the engine's dedicated server on the replay
+  and serves a small web page. Runs in Docker.
+- **`barwatch`**, the desktop app for Linux and Windows. It opens from an invite
+  link, installs whatever the replay needs, and starts the game as a spectator.
+
+## Joining a watch party
+
+1. Get the app.
+   - **Windows:** download `barwatch-…-windows-x86_64.exe` from the
+     [latest release](https://github.com/u6bkep/barwatch/releases/latest) and run it
+     once. Windows shows a "protected your PC" notice because the file is not signed:
+     choose *More info*, then *Run anyway*. The app copies itself to
+     `%LOCALAPPDATA%\Programs\barwatch` and registers `barwatch://` links, so the
+     download can be deleted afterwards.
+   - **Arch Linux:**
+     ```
+     git clone https://github.com/u6bkep/barwatch
+     cd barwatch/packaging/arch && makepkg -si
+     ```
+   - **Other Linux:** take `barwatch` from the release tarball and run it once; it
+     registers the link handler for your user.
+2. Open the invite link you were sent and press **Join in barwatch**. The app asks
+   before it joins.
+3. Wait for *Ready*. The replay starts for everyone when someone presses **Start**.
+   If it is already running you are dropped straight in and caught up.
+
+The app uses Beyond All Reason's own data folder, so an engine, game version or map
+that BAR already downloaded is not downloaded again, and anything barwatch fetches is
+there for BAR afterwards. Without a BAR installation it keeps a folder of its own and
+downloads everything (several GB the first time).
+
+### While watching
+
+Pause and the speed keys work in game for every viewer, as in any replay. These work
+from game chat, and the server's web page has buttons for the same things:
+
+| chat | does |
+|---|---|
+| `!skip 14:00` | jump to game time 14:00 |
+| `!skip +2m` | jump ahead two minutes (`+90`, `+90s`, `+1:30` also work) |
+| `!pause`, `!resume` | pause and resume for everyone |
+| `!speed 2` | set the speed for everyone (0.3 to 20) |
+| `!help` | list these |
+
+Jumps only go forward: the engine cannot rewind. To go back, stop the party and start
+it again.
+
+## Starting a watch party
+
+On the server's web page: drop a `.sdfz` replay onto it, or paste a replay link or id
+from the BAR website. Then send the invite link it shows.
+
+From the desktop app: pair it with the server once (on the web page, press *Pair the
+desktop app on this computer*). After that, **My replays** lists the replays in your
+BAR folder with their map, players and length; pick one and press **Watch together**.
+The replay is uploaded, the invite link is copied to the clipboard, and the app joins.
+
+## Running the server
 
 ```
-barwatch host "demos/2026-11-09_03-41-09-673_Comet Catcher Remake 1.8_2026.07.04.sdfz"
+cp docker-compose.example.yml docker-compose.yml
+docker compose up -d
 ```
 
-It prints a join line. Friends run:
+| what | default | setting |
+|---|---|---|
+| web page and API, HTTP/1 and h2c on one port | `0.0.0.0:8780` | `BARWATCH_LISTEN` |
+| game traffic, one UDP port per running party | `8480-8489` | `BARWATCH_UDP_PORTS` |
+| address game clients connect to | host of the page's URL | `BARWATCH_GAME_HOST` |
+| replays, engines, state | `/data` | `BARWATCH_DATA` |
+| largest replay accepted | 256 MiB | `BARWATCH_MAX_UPLOAD_MB` |
+| parties are deleted after | 14 days | `BARWATCH_SESSION_DAYS` |
 
-```
-barwatch join <host-ip> --name <their-name>
-```
+**The daemon has no login of its own.** The intended setup:
 
-Each joiner installs the engine version / game version / map from the replay if missing
-(engine from the Recoil GitHub releases, game and map through the engine's
-`pr-downloader`), then reports **ready**. When everyone is ready the host presses Enter
-(or passes `--auto-start N`). The host engine starts first; once it is listening, every
-joiner's engine launches and connects as a spectator.
+- Put the web page behind a reverse proxy that authenticates. The proxy may speak
+  HTTP/1 or h2c to the daemon.
+- Let the path prefix **`/app/`** through without a login. The desktop app and the
+  public join page live there. A party's id (22 random characters) is what lets
+  someone see, join and control that party; creating parties through `/app/` needs
+  the token handed out by pairing.
+- Forward the UDP port range from the internet to the host unchanged. Game clients
+  connect to those ports directly; they do not pass through the proxy.
 
-Joiners do **not** need the replay file: the host engine streams the demo contents.
-`--send-replay` on the host plus `--save-replay` on a joiner copies the file anyway.
+Anyone who learns a running party's UDP port can connect to it as a spectator: the
+engine has no access control when it hosts a replay.
 
-The engine's console output goes to `<data>/barwatch_engine.log`. Other options: `barwatch info` (detected data dir and installed engines), `--data-dir`
-(override auto-detection; also `$BAR_DATA_DIR`), `--headless` (use `spring-headless`,
-for testing).
-
-## Networking
-
-Direct connection only. The host needs two reachable ports, both default values can be
-changed with flags:
-
-| purpose                       | default   |
-|-------------------------------|-----------|
-| control channel (`barwatch`)  | TCP 8471  |
-| engine                        | UDP 8470  |
-
-Behind NAT, forward both to the host machine, or put everyone on a VPN such as Tailscale.
-
-## Data directory
-
-Auto-detected in this order: `--data-dir`, `$BAR_DATA_DIR`, flatpak
-(`~/.var/app/info.beyondallreason.bar/data`), native Linux launcher
-(`~/.local/state/Beyond All Reason`), Windows launcher
-(`%LOCALAPPDATA%\Programs\Beyond-All-Reason\data`). Engines are looked up in
-`<data>/engine/` using the launcher's directory naming (`recoil_2026.07.04`,
-`105.1.1-2590-gb9462a0 bar`, `rel2501.2025.01.6`) and downloaded there if absent.
+The server needs no game content. For each replay it downloads the matching engine
+release once (about 100 MB) and runs its dedicated server, which only streams the
+recording: around 30 MB of memory and next to no CPU per running party.
 
 ## How it works
 
-1. Host parses the `.sdfz` header and embedded start script for engine version,
-   game version, map and the player names in the demo.
-2. Host provisions engine + content, then listens on the control port.
-3. Each joiner sends `Hello{name}`, gets a `Manifest` (versions, UDP port, assigned
-   name), provisions, and sends `Status{ready}`. Names that collide with a demo player
-   or another joiner get a `_spec` suffix: the engine rejects a joiner whose name is
-   already in the replay.
-4. On start, the host writes a five-line start script (`DemoFile=…; HostIP; HostPort;
-   MyPlayerName; IsHost=1`) and runs the engine; it waits for the engine's infolog to
-   report the UDP socket bound, then broadcasts `Start`.
-5. Joiners write a connect script (`HostIP; HostPort; MyPlayerName; IsHost=0`) and run
-   the engine.
+- A replay records the original server's setup text, random seed and content hashes
+  in its first packet. `barwatchd` builds a start script from those, marks every
+  recorded player as coming from the demo, and starts `spring-dedicated` on it. The
+  dedicated server streams the recording to whoever connects and never simulates.
+- The daemon follows the server over the engine's autohost interface (UDP on
+  localhost): it learns who connected, reads chat for `!` commands, and sends
+  `/skip`, `/pause` and speed changes.
+- The recording begins with the original lobby wait; the daemon skips it.
+- The app registers with the party over HTTP, reports its progress, and long-polls
+  for changes. When the party runs, it writes a four-line script and starts the
+  engine: `spring --write-dir <BAR data> --isolation <script>`.
 
-The engine replays the original game's pre-start wait in real time, so expect the same
-lobby-to-start delay the original match had before frame 0.
-
-## Building
-
-```
-cargo build --release                                  # Linux
-cargo build --release --target x86_64-pc-windows-gnu   # Windows (needs mingw-w64)
-```
+`crates/barwatch-core` holds what both sides share (replay parsing, start scripts,
+engine installs, API types), `crates/barwatchd` the server, `crates/barwatch` the app.
+The app's window is built with [damascene](https://github.com/computer-whisperer/damascene).
 
 ## Known limits
 
-- The engine drops Lua messages between live spectators while replaying, so widget
-  features that talk between spectators will not work; chat and map drawing do.
-- Any spectator can pause, change speed or skip; the engine has no per-player control.
-- Live joiners occupy player slots above the demo's own count; very crowded replays
-  (hundreds of spectator joins in the original) can run out.
+- Only tested with engine 2026.07.04. Older 105.x replays are untried.
+- The Windows build is cross-compiled and its link registration was checked under
+  Wine, not yet on a Windows machine.
+- The engine saves its own recording of what you watch into your `demos` folder, as
+  it does for any game you spectate.
+- Do not run barwatch while a BAR game is open on the same data folder; the two
+  engines would share one log and settings file.
+- A second invite link opens a second window rather than reusing the open one.
+
+## Development
+
+```
+cargo test --workspace
+cargo run -p barwatchd -- --data ./data --listen 127.0.0.1:8780
+cargo run -p barwatch -- join http://127.0.0.1:8780/app/join/<id> --headless --data-dir <scratch>
+```
+
+`join --headless` runs the session client without a window and the engine without
+graphics, which is how the sync tests were done. Point `--data-dir` at a scratch
+folder that links `pool`, `packages`, `maps` and `rapid` from a real BAR folder.
+
+The window renders without a display: `BARWATCH_FIXTURE=<scene>` picks a canned state
+(`empty`, `preparing`, `ready`, `playing`, `failed`, `replays`, `settings`, `consent`)
+and `DAMASCENE_HEADLESS_SHOT=out.png` writes one frame and exits. The same scenes are
+held to damascene's layout lints in the tests.
+
+## License
+
+MIT or Apache-2.0, at your option.

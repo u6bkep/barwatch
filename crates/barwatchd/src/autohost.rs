@@ -10,9 +10,17 @@ pub enum Event {
     Quit,
     /// A line of the server's log, e.g. `Beginning demo playback`.
     Message(String),
-    PlayerJoined { number: u8, name: String },
-    PlayerLeft { number: u8 },
-    Chat { number: u8, text: String },
+    PlayerJoined {
+        number: u8,
+        name: String,
+    },
+    PlayerLeft {
+        number: u8,
+    },
+    Chat {
+        number: u8,
+        text: String,
+    },
     GameOver,
     /// Anything barwatch has no use for.
     Other(u8),

@@ -110,9 +110,7 @@ impl Demo {
     /// Names of every `[playerN]` section: players and the spectators present at
     /// start. The engine refuses a live viewer whose name equals one of these.
     pub fn player_names(&self) -> Vec<String> {
-        self.sections("player")
-            .filter_map(|(_, sec)| sec.get("name")?.as_str().map(str::to_owned))
-            .collect()
+        self.sections("player").filter_map(|(_, sec)| sec.get("name")?.as_str().map(str::to_owned)).collect()
     }
 
     pub fn roster(&self) -> Roster {
@@ -131,11 +129,7 @@ impl Demo {
             }
         }
         for (_, sec) in self.sections("ai") {
-            let label = sec
-                .get("shortname")
-                .or_else(|| sec.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("AI");
+            let label = sec.get("shortname").or_else(|| sec.get("name")).and_then(Value::as_str).unwrap_or("AI");
             if let Some(a) = sec.get("team").and_then(Value::as_str).and_then(|t| ally_of_team(t.trim())) {
                 by_ally.entry(a).or_default().push(format!("{label} (AI)"));
             }

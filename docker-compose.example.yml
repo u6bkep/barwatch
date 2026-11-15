@@ -1,0 +1,31 @@
+# barwatch server. Copy to docker-compose.yml and adjust.
+#
+#   docker compose up -d
+#
+# Web page and API   http://<host>:8780   (HTTP/1 and h2c on the same port)
+# Game traffic       udp 8480-8489, one port per running watch party
+#
+# The daemon has no login of its own. Put the web page behind a reverse proxy that
+# authenticates, and let the path prefix /app/ through without a login: the desktop
+# app and the public join page live there. The UDP ports are reached directly by
+# viewers' game clients, so forward them from the internet to this host as they are.
+
+services:
+  barwatch:
+    image: ghcr.io/u6bkep/barwatch:latest
+    restart: unless-stopped
+    # init reaps a hosting server if the daemon is killed hard
+    init: true
+    environment:
+      # The address viewers' game clients connect to, if it differs from the host
+      # name of the web page (for example when the page is behind a CDN or tunnel).
+      # BARWATCH_GAME_HOST: bar.example.org
+      BARWATCH_UDP_PORTS: 8480-8489
+    ports:
+      - "8780:8780"
+      - "8480-8489:8480-8489/udp"
+    volumes:
+      - barwatch-data:/data
+
+volumes:
+  barwatch-data:

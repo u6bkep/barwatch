@@ -19,7 +19,8 @@ const MAX_SIDE: u32 = 512;
 /// Loads the picture of the map with in-game name `map`.
 pub async fn load(http: &reqwest::Client, index: &MapIndex, cache: &Path, map: &str) -> Result<Picture> {
     let file = index.file_name(map);
-    let safe: String = file.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+    let safe: String =
+        file.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
     let path = cache.join("maps").join(format!("{safe}.jpg"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,

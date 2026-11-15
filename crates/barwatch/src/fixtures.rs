@@ -106,11 +106,21 @@ pub fn scene(name: &str) -> Option<Ui> {
             ),
         ),
         "replays" => {
-            let maps = ["Comet Catcher Remake 1.8", "Supreme Isthmus v2.1", "All That Glitters v2.2.3", "Quicksilver Remake 1.24"];
+            let maps =
+                ["Comet Catcher Remake 1.8", "Supreme Isthmus v2.1", "All That Glitters v2.2.3", "Quicksilver Remake 1.24"];
             let list: Vec<LocalReplay> = (0..40)
                 .map(|i| {
-                    let info = replay(maps[i % maps.len()], 1_791_427_890 - i as u64 * 86_400, 600 + i as u32 * 37, &[&["Moth", "Quill"], &["Ember", "Tarn"]]);
-                    LocalReplay { path: format!("/demos/{}", info.file_name).into(), file_name: info.file_name.clone(), info: (i != 5).then_some(info) }
+                    let info = replay(
+                        maps[i % maps.len()],
+                        1_791_427_890 - i as u64 * 86_400,
+                        600 + i as u32 * 37,
+                        &[&["Moth", "Quill"], &["Ember", "Tarn"]],
+                    );
+                    LocalReplay {
+                        path: format!("/demos/{}", info.file_name).into(),
+                        file_name: info.file_name.clone(),
+                        info: (i != 5).then_some(info),
+                    }
                 })
                 .collect();
             ui.fixture_replays(list, Some(1));
