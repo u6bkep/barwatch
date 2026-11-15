@@ -35,10 +35,7 @@ pub fn time_at(x: f32, left: f32, width: f32, end_s: f32) -> f32 {
 
 /// A gap between ticks that gives about `max_ticks` of them.
 pub fn tick_step(end_s: f32, max_ticks: f32) -> f32 {
-    [60.0, 120.0, 300.0, 600.0, 900.0, 1200.0, 1800.0, 3600.0]
-        .into_iter()
-        .find(|s| end_s / s <= max_ticks)
-        .unwrap_or(7200.0)
+    [60.0, 120.0, 300.0, 600.0, 900.0, 1200.0, 1800.0, 3600.0].into_iter().find(|s| end_s / s <= max_ticks).unwrap_or(7200.0)
 }
 
 /// The box a tick's label is drawn in, px: the text is about 40 wide, centred.
@@ -189,7 +186,8 @@ mod tests {
         assert!(all.iter().all(|t| t.labelled));
         // A chip over 15:00 hides that label and no other.
         let x = frac(900.0, 2400.0) * 900.0;
-        let hidden: Vec<f32> = ticks(2400.0, 900.0, &[(x - 25.0, x + 25.0)]).iter().filter(|t| !t.labelled).map(|t| t.t).collect();
+        let hidden: Vec<f32> =
+            ticks(2400.0, 900.0, &[(x - 25.0, x + 25.0)]).iter().filter(|t| !t.labelled).map(|t| t.t).collect();
         assert_eq!(hidden, vec![900.0]);
         // The last label is drawn inside the axis, left of its tick: a chip
         // that ends 20 px short of the edge still runs into it.

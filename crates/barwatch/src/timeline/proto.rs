@@ -81,7 +81,9 @@ impl App for Proto {
         .gap(tokens::SPACE_3)
         .align(Align::Center);
         let frame = if self.speed > 0.0 { Duration::from_millis(50) } else { Duration::from_millis(500) };
-        let main = page([stand_in, scroll([self.timeline.view(cx)]).key("proto-scroll").fill_height()]).gap(tokens::SPACE_3).redraw_within(frame);
+        let main = page([stand_in, scroll([self.timeline.view(cx)]).key("proto-scroll").fill_height()])
+            .gap(tokens::SPACE_3)
+            .redraw_within(frame);
         overlays(main, self.timeline.layers().into_iter().map(Some))
     }
 

@@ -31,9 +31,9 @@ mod proto;
 
 pub use data::{Data, MetricDef};
 pub use icons::Icons;
-pub use marks::{MarkClass, Marker};
 #[cfg(test)]
 use marks::{Faction, MarkKind};
+pub use marks::{MarkClass, Marker};
 pub use paint::shaders;
 pub use proto::{Proto, ProtoOptions};
 
@@ -351,7 +351,10 @@ impl Timeline {
         }
         // The game reached or passed the cursor: carry on together. Past the
         // end of the game a cursor has nothing left to wait for.
-        if self.cursor.is_some_and(|c| (c > before - 0.75 && c <= self.game_s + 0.75 && self.jump.is_none()) || (over && c > self.game_s)) {
+        if self
+            .cursor
+            .is_some_and(|c| (c > before - 0.75 && c <= self.game_s + 0.75 && self.jump.is_none()) || (over && c > self.game_s))
+        {
             self.cursor = None;
         }
     }
@@ -505,7 +508,9 @@ impl Timeline {
             _ => {}
         }
         let metrics = self.data.metrics.len();
-        if select::apply_event(&mut self.hero, &mut self.metric_open, event, KEY_METRIC, |s| s.parse().ok().filter(|m| *m < metrics)) {
+        if select::apply_event(&mut self.hero, &mut self.metric_open, event, KEY_METRIC, |s| {
+            s.parse().ok().filter(|m| *m < metrics)
+        }) {
             return None;
         }
         let end_s = self.motion.borrow().horizon.map(|h| h.value).unwrap_or_else(|| self.horizon_s());
@@ -588,11 +593,7 @@ impl Timeline {
         let narrow = viewport_w < 900.0;
         let gutter = if narrow { 212.0 } else { 300.0 };
         let compact = cx.viewport_height().is_some_and(|h| h < COMPACT_BELOW);
-        let w = cx
-            .rect_of_key(KEY_LEAD)
-            .map(|r| r.w)
-            .unwrap_or(viewport_w - 2.0 * tokens::SPACE_4 - gutter - 12.0)
-            .max(120.0);
+        let w = cx.rect_of_key(KEY_LEAD).map(|r| r.w).unwrap_or(viewport_w - 2.0 * tokens::SPACE_4 - gutter - 12.0).max(120.0);
         let now = Instant::now();
         let mut motion = self.motion.borrow_mut();
         motion.moving = false;
@@ -617,7 +618,9 @@ impl Timeline {
         if !f.compact {
             tracks.push(self.gap(&f, HERO_GAP_H, "gap", El::new(Kind::Custom("tl_gutter"))));
             tracks.push(self.hero_chart(&f));
-            let label = column([text("Shown in the large chart:").caption().muted()]).justify(Justify::End).padding(Sides { bottom: 3.0, ..Sides::zero() });
+            let label = column([text("Shown in the large chart:").caption().muted()])
+                .justify(Justify::End)
+                .padding(Sides { bottom: 3.0, ..Sides::zero() });
             tracks.push(self.gap(&f, LIST_HEAD_H, "list", label));
             for m in 0..self.data.metrics.len() {
                 tracks.push(self.metric_row(&f, m));
@@ -674,17 +677,16 @@ impl Timeline {
         } else if !self.hide_future {
             clock_line.push(text(format!("of {}", clock(d.duration_s))).muted());
         }
-        let game = column([
-            text("GAME").caption().muted(),
-            row(clock_line).gap(tokens::SPACE_2).align(Align::Center),
-        ])
-        .gap(2.0);
+        let game = column([text("GAME").caption().muted(), row(clock_line).gap(tokens::SPACE_2).align(Align::Center)]).gap(2.0);
 
         let (status, detail, follow): (El, String, bool) = if let Some(target) = self.jump {
             (
-                row([spinner_with_color(cursor_color()).width(Size::Fixed(14.0)).height(Size::Fixed(14.0)), text(format!("Jumping everyone to {}", clock(target)))])
-                    .gap(tokens::SPACE_2)
-                    .align(Align::Center),
+                row([
+                    spinner_with_color(cursor_color()).width(Size::Fixed(14.0)).height(Size::Fixed(14.0)),
+                    text(format!("Jumping everyone to {}", clock(target))),
+                ])
+                .gap(tokens::SPACE_2)
+                .align(Align::Center),
                 "The game runs ahead until it gets there".into(),
                 false,
             )
@@ -724,7 +726,11 @@ impl Timeline {
             column(status_col).gap(2.0).width(Size::Fill(1.0)).padding(Sides { left: tokens::SPACE_6, ..Sides::zero() }),
         ];
         if follow {
-            items.push(row([button("Follow the game").key("tl:follow").secondary().small(), kbd("Esc")]).gap(tokens::SPACE_2).align(Align::Center));
+            items.push(
+                row([button("Follow the game").key("tl:follow").secondary().small(), kbd("Esc")])
+                    .gap(tokens::SPACE_2)
+                    .align(Align::Center),
+            );
         }
         if d.sides.iter().any(|s| s.teams.len() > 1) && !f.compact {
             items.push(toggle_group(
@@ -752,7 +758,9 @@ impl Timeline {
     /// that is drawn on a surface of its own.
     fn track_inset(&self, f: &Frame, h: f32, inset: Sides, gutter: El, area: El) -> El {
         let padding = Sides { right: tokens::SPACE_3, ..inset };
-        row([gutter.width(Size::Fixed(f.gutter)).height(Size::Fixed(h)).padding(padding), area]).height(Size::Fixed(h)).width(Size::Fill(1.0))
+        row([gutter.width(Size::Fixed(f.gutter)).height(Size::Fixed(h)).padding(padding), area])
+            .height(Size::Fixed(h))
+            .width(Size::Fill(1.0))
     }
 
     fn area_key(id: &str) -> String {
@@ -781,7 +789,11 @@ impl Timeline {
     /// One lane per side (up to four), else one shared lane.
     fn lanes(&self) -> usize {
         let s = self.data.sides.len();
-        if s <= 4 { s.max(1) } else { 1 }
+        if s <= 4 {
+            s.max(1)
+        } else {
+            1
+        }
     }
 
     fn lanes_height(&self) -> f32 {
@@ -817,7 +829,12 @@ impl Timeline {
             };
             let mut label = vec![status_dot(color), text(name).caption().muted().ellipsis().width(Size::Fill(1.0))];
             if sample && lane == 0 {
-                label.push(badge("sample events").warning().key("tl:sample-note").tooltip("Made up to try the design (--sample-markers): not from this replay"));
+                label.push(
+                    badge("sample events")
+                        .warning()
+                        .key("tl:sample-note")
+                        .tooltip("Made up to try the design (--sample-markers): not from this replay"),
+                );
             }
             let legend = [MarkClass::Built, MarkClass::Tech, MarkClass::Attack, MarkClass::Lost]
                 .map(|c| format!("{} {}", c.sign(), c.label()))
@@ -858,7 +875,8 @@ impl Timeline {
                 .radius(2.0)
                 .fill_size(),
         };
-        let framed = stack([inner]).padding(1.5).fill(team.color).radius(3.5).width(Size::Fixed(BADGE)).height(Size::Fixed(BADGE));
+        let framed =
+            stack([inner]).padding(1.5).fill(team.color).radius(3.5).width(Size::Fixed(BADGE)).height(Size::Fixed(BADGE));
         let mut kids = vec![framed];
         let class = lead.kind.class();
         let with_sign = class != MarkClass::Out;
@@ -923,7 +941,13 @@ impl Timeline {
             .key(key)
             .tooltip(lines.join("\n"))
             .cursor(Cursor::Pointer)
-            .opacity(if hot { 1.0 } else if unplayed { 0.45 } else { 1.0 })
+            .opacity(if hot {
+                1.0
+            } else if unplayed {
+                0.45
+            } else {
+                1.0
+            })
             .scale(if hot { 1.18 } else { 1.0 })
             .animate(Timing::SPRING_QUICK)
             .aria_label(format!("{} at {}", lead.kind.label(), clock(lead.t)))
@@ -975,13 +999,22 @@ impl Timeline {
                     paths.push(p);
                 }
             }
-            paths.push(PathBuilder::new().move_to(0.0, mid).line_to(f.w, mid).stroke_solid(Color::srgb_u8(63, 63, 70), 1.0).build());
+            paths.push(
+                PathBuilder::new().move_to(0.0, mid).line_to(f.w, mid).stroke_solid(Color::srgb_u8(63, 63, 70), 1.0).build(),
+            );
             // Where the lead changed hands: a diamond in the colour of the new leader.
             for (i, side) in &d.lead_changes {
                 if *i < shown {
                     let (cx, r) = (x(*i), 4.0);
                     let diamond = |r: f32, c: Color| {
-                        PathBuilder::new().move_to(cx, mid - r).line_to(cx + r, mid).line_to(cx, mid + r).line_to(cx - r, mid).close().fill_solid(c).build()
+                        PathBuilder::new()
+                            .move_to(cx, mid - r)
+                            .line_to(cx + r, mid)
+                            .line_to(cx, mid + r)
+                            .line_to(cx - r, mid)
+                            .close()
+                            .fill_solid(c)
+                            .build()
                     };
                     paths.push(diamond(r + 1.5, Color::srgb_u8(20, 20, 23)));
                     paths.push(diamond(r, d.sides[*side].color.lighten(0.25)));
@@ -1004,7 +1037,10 @@ impl Timeline {
                 paths.push(p.close().fill_solid(side.color.with_alpha(0.75)).build());
             }
         }
-        items.push((Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 }, vector(VectorAsset::from_paths([0.0, 0.0, f.w, h], paths))));
+        items.push((
+            Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 },
+            vector(VectorAsset::from_paths([0.0, 0.0, f.w, h], paths)),
+        ));
         let area = placed(Some(h), 0.0, items)
             .key(KEY_LEAD)
             .focusable()
@@ -1019,7 +1055,12 @@ impl Timeline {
     fn lead_gutter(&self) -> El {
         let d = &self.data;
         let at = self.readout_s();
-        let mut lines = vec![row([text("Who is ahead").label(), text("metal income, 75 s").caption().muted().ellipsis().width(Size::Fill(1.0))]).gap(tokens::SPACE_2).align(Align::Center)];
+        let mut lines = vec![row([
+            text("Who is ahead").label(),
+            text("metal income, 75 s").caption().muted().ellipsis().width(Size::Fill(1.0)),
+        ])
+        .gap(tokens::SPACE_2)
+        .align(Align::Center)];
         if self.game_s < d.period_s {
             lines.push(text("Waiting for the first numbers").caption().muted());
         } else if let Some(why) = self.hidden_reason(at) {
@@ -1049,15 +1090,27 @@ impl Timeline {
     fn hero_series(&self) -> Vec<(Option<usize>, String, Color, Vec<f32>)> {
         let d = &self.data;
         if self.per_player {
-            d.teams.iter().enumerate().map(|(t, team)| (Some(t), team.name.clone(), team.color, d.team_values(self.hero(), t).to_vec())).collect()
+            d.teams
+                .iter()
+                .enumerate()
+                .map(|(t, team)| (Some(t), team.name.clone(), team.color, d.team_values(self.hero(), t).to_vec()))
+                .collect()
         } else {
-            d.sides.iter().enumerate().map(|(s, side)| (None, side.name.clone(), side.color, d.side_values(self.hero(), s))).collect()
+            d.sides
+                .iter()
+                .enumerate()
+                .map(|(s, side)| (None, side.name.clone(), side.color, d.side_values(self.hero(), s)))
+                .collect()
         }
     }
 
     fn hero_height(&self) -> f32 {
         // Room for the ranked list: seven players and a line of advice.
-        if self.per_player { HERO_H + 60.0 } else { HERO_H }
+        if self.per_player {
+            HERO_H + 60.0
+        } else {
+            HERO_H
+        }
     }
 
     /// The scale a chart uses, glided toward the top of what it may draw, and
@@ -1094,9 +1147,14 @@ impl Timeline {
                 continue;
             }
             let gy = y(value).round() + 0.5;
-            asset.paths.push(PathBuilder::new().move_to(0.0, gy).line_to(f.w, gy).stroke_solid(Color::srgb_u8(39, 39, 42), 1.0).build());
+            asset
+                .paths
+                .push(PathBuilder::new().move_to(0.0, gy).line_to(f.w, gy).stroke_solid(Color::srgb_u8(39, 39, 42), 1.0).build());
             if level > 0.0 && shown >= 2 {
-                items.push((Place::Tag { at: 0.0, w: None, h: 16.0, top: gy - 16.0, anchor: Anchor::After }, text(number(value)).caption().muted().tabular_numerals().padding(Sides { left: 2.0, ..Sides::zero() })));
+                items.push((
+                    Place::Tag { at: 0.0, w: None, h: 16.0, top: gy - 16.0, anchor: Anchor::After },
+                    text(number(value)).caption().muted().tabular_numerals().padding(Sides { left: 2.0, ..Sides::zero() }),
+                ));
             }
         }
         let many = series.len() > 4;
@@ -1242,13 +1300,17 @@ impl Timeline {
             let room = 7;
             let picked_row = self.picked.and_then(|p| ranked.iter().position(|s| s.0 == Some(p)));
             for (rank, s) in ranked.iter().enumerate() {
-                let keep = rank < room - 1 || Some(rank) == picked_row || (rank == room - 1 && picked_row.is_none_or(|p| p < room));
+                let keep =
+                    rank < room - 1 || Some(rank) == picked_row || (rank == room - 1 && picked_row.is_none_or(|p| p < room));
                 if !keep {
                     continue;
                 }
                 let team = s.0.unwrap_or(0);
                 let selected = self.picked == Some(team);
-                let (name, value) = (text(s.1.clone()).caption().ellipsis().width(Size::Fill(1.0)), text(def.show(s.3[i])).caption().tabular_numerals());
+                let (name, value) = (
+                    text(s.1.clone()).caption().ellipsis().width(Size::Fill(1.0)),
+                    text(def.show(s.3[i])).caption().tabular_numerals(),
+                );
                 let mut r = row([
                     text(format!("{}", rank + 1)).caption().muted().tabular_numerals().width(Size::Fixed(16.0)),
                     status_dot(s.2),
@@ -1327,7 +1389,11 @@ impl Timeline {
         let (top, _) = self.eased_top(f, m, false, peak);
         let (pt, pb) = (5.0, 4.0);
         let y = |v: f32| pt + (1.0 - v / top).clamp(-0.05, 1.0) * (h - pt - pb);
-        let mut paths = vec![PathBuilder::new().move_to(0.0, h - 0.5).line_to(f.w, h - 0.5).stroke_solid(Color::srgb_u8(32, 32, 36), 1.0).build()];
+        let mut paths = vec![PathBuilder::new()
+            .move_to(0.0, h - 0.5)
+            .line_to(f.w, h - 0.5)
+            .stroke_solid(Color::srgb_u8(32, 32, 36), 1.0)
+            .build()];
         let mut items = Vec::new();
         if shown >= 2 {
             for (color, v) in &lines {
@@ -1341,7 +1407,10 @@ impl Timeline {
                 }
             }
         }
-        items.push((Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 }, vector(VectorAsset::from_paths([0.0, 0.0, f.w, h], paths))));
+        items.push((
+            Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 },
+            vector(VectorAsset::from_paths([0.0, 0.0, f.w, h], paths)),
+        ));
         let at = self.readout_s();
         let visible = self.revealed(at) && self.game_s >= d.period_s;
         let i = d.sample_index(at);
@@ -1365,14 +1434,18 @@ impl Timeline {
         let hot = f.is_hovered(&key);
         let mut cells = vec![
             choice_mark(selected, hot),
-            if selected || hot { text(def.label).label().ellipsis() } else { text(def.label).muted().ellipsis() }.width(Size::Fill(1.0)),
+            if selected || hot { text(def.label).label().ellipsis() } else { text(def.label).muted().ellipsis() }
+                .width(Size::Fill(1.0)),
         ];
         match picked {
             // One player: the value and where it stands among all players.
             Some(_) => {
                 let v = lines[0].1[i];
                 let rank = 1 + (0..d.teams.len()).filter(|t| d.team_values(m, *t)[i] > v).count();
-                let value = text(if visible { def.show(v) } else { "–".into() }).tabular_numerals().end_text().width(Size::Fixed(if f.narrow { 40.0 } else { 46.0 }));
+                let value = text(if visible { def.show(v) } else { "–".into() })
+                    .tabular_numerals()
+                    .end_text()
+                    .width(Size::Fixed(if f.narrow { 40.0 } else { 46.0 }));
                 cells.push(if visible { value } else { value.muted() });
                 let standing = match (visible, f.narrow) {
                     (false, _) => String::new(),
@@ -1380,7 +1453,11 @@ impl Timeline {
                     (true, false) => format!("#{rank} of {}", d.teams.len()),
                 };
                 // As wide as the bar and second number it stands in for.
-                cells.push(text(standing).caption().muted().tabular_numerals().width(Size::Fixed(if f.narrow { 40.0 } else { 124.0 })));
+                cells.push(text(standing).caption().muted().tabular_numerals().width(Size::Fixed(if f.narrow {
+                    40.0
+                } else {
+                    124.0
+                })));
             }
             None => {
                 let vals: Vec<(Color, f32)> = lines.iter().map(|(color, v)| (*color, v[i])).collect();
@@ -1424,19 +1501,31 @@ impl Timeline {
         let fog_top = RULER_H;
         if g < 1.0 {
             if self.hide_future {
-                items.push((Place::Span { from: g, to: 1.0, top: fog_top, bottom: 0.0 }, paint::fog(Color::srgb_u8(30, 30, 34).with_alpha(0.94), 22.0)));
+                items.push((
+                    Place::Span { from: g, to: 1.0, top: fog_top, bottom: 0.0 },
+                    paint::fog(Color::srgb_u8(30, 30, 34).with_alpha(0.94), 22.0),
+                ));
                 let fog_w = (1.0 - g) * f.w;
                 // Not where the cursor's line would run through the words.
                 let middle = (g + 1.0) / 2.0 * f.w;
                 let struck = self.cursor.is_some_and(|c| (frac(c, f.end_s) * f.w - middle).abs() < 52.0);
                 if fog_w > 140.0 && self.jump.is_none() && !struck {
                     items.push((
-                        Place::Tag { at: (g + 1.0) / 2.0, w: None, h: 16.0, top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0, anchor: Anchor::Center },
+                        Place::Tag {
+                            at: (g + 1.0) / 2.0,
+                            w: None,
+                            h: 16.0,
+                            top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0,
+                            anchor: Anchor::Center,
+                        },
                         text("Not played yet").caption().muted(),
                     ));
                 }
             } else {
-                items.push((Place::Span { from: g, to: 1.0, top: fog_top, bottom: 0.0 }, quad(tokens::BACKGROUND.with_alpha(0.3))));
+                items.push((
+                    Place::Span { from: g, to: 1.0, top: fog_top, bottom: 0.0 },
+                    quad(tokens::BACKGROUND.with_alpha(0.3)),
+                ));
             }
         }
         // Statistics still being worked out between what is done and the game.
@@ -1445,7 +1534,13 @@ impl Timeline {
             items.push((Place::Span { from, to: g, top: fog_top, bottom: 0.0 }, skeleton().radius(0.0)));
             if (g - from) * f.w > 120.0 {
                 items.push((
-                    Place::Tag { at: (from + g) / 2.0, w: None, h: 16.0, top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0, anchor: Anchor::Center },
+                    Place::Tag {
+                        at: (from + g) / 2.0,
+                        w: None,
+                        h: 16.0,
+                        top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0,
+                        anchor: Anchor::Center,
+                    },
                     text("Working out the numbers…").caption().muted(),
                 ));
             }
@@ -1453,16 +1548,28 @@ impl Timeline {
         if let Some(target) = self.jump {
             let to = frac(target, f.end_s);
             items.push((Place::Span { from: g, to, top: fog_top, bottom: 0.0 }, paint::sweep(cursor_color().with_alpha(0.035))));
-            items.push((Place::Line { at: to, w: 9.0, top: RULER_H - 4.0, bottom: 0.0 }, paint::glow_line(cursor_color(), 1.5, 3.0, 0.25, 4.0)));
+            items.push((
+                Place::Line { at: to, w: 9.0, top: RULER_H - 4.0, bottom: 0.0 },
+                paint::glow_line(cursor_color(), 1.5, 3.0, 0.25, 4.0),
+            ));
         }
         // The hover line: thin and plain, under the two position lines. On
         // the game line or on the cursor it has nothing of its own to add.
         if let Some(hv) = f.hover.filter(|h| !h.on_game && Some(h.t) != self.cursor) {
-            items.push((Place::Line { at: frac(hv.t, f.end_s), w: 1.0, top: RULER_H - 4.0, bottom: 0.0 }, quad(tokens::FOREGROUND.with_alpha(0.42))));
+            items.push((
+                Place::Line { at: frac(hv.t, f.end_s), w: 1.0, top: RULER_H - 4.0, bottom: 0.0 },
+                quad(tokens::FOREGROUND.with_alpha(0.42)),
+            ));
         }
-        items.push((Place::Line { at: g, w: 16.0, top: RULER_H - 4.0, bottom: 0.0 }, paint::glow_line(game_color(), 2.0, 4.0, 0.12, 0.0)));
+        items.push((
+            Place::Line { at: g, w: 16.0, top: RULER_H - 4.0, bottom: 0.0 },
+            paint::glow_line(game_color(), 2.0, 4.0, 0.12, 0.0),
+        ));
         if let Some(c) = self.cursor.filter(|c| Some(*c) != self.jump) {
-            items.push((Place::Line { at: frac(c, f.end_s), w: 12.0, top: RULER_H - 4.0, bottom: 0.0 }, paint::glow_line(cursor_color(), 2.0, 3.0, 0.12, 0.0)));
+            items.push((
+                Place::Line { at: frac(c, f.end_s), w: 12.0, top: RULER_H - 4.0, bottom: 0.0 },
+                paint::glow_line(cursor_color(), 2.0, 3.0, 0.12, 0.0),
+            ));
         }
         self.position_chips(f, &mut items);
         // No wider than half the axis, so that one side of the line always has room for it.
@@ -1471,7 +1578,8 @@ impl Timeline {
             let x = frac(hv.t, f.end_s) * f.w;
             // Beside the line, on the side with room, level with the pointer.
             let left = x + READOUT_GAP + wide > f.w;
-            let pad = if left { Sides { right: READOUT_GAP, ..Sides::zero() } } else { Sides { left: READOUT_GAP, ..Sides::zero() } };
+            let pad =
+                if left { Sides { right: READOUT_GAP, ..Sides::zero() } } else { Sides { left: READOUT_GAP, ..Sides::zero() } };
             // Level with the pointer on the large chart; under a low track
             // (over it at the bottom), so the track's own line stays in view.
             let top = match hv.track {
@@ -1479,12 +1587,22 @@ impl Timeline {
                 track => {
                     let (top, tall) = self.track_span(track);
                     let under = top + tall + 4.0;
-                    if under + h <= height - 2.0 { under } else { top - h - 4.0 }
+                    if under + h <= height - 2.0 {
+                        under
+                    } else {
+                        top - h - 4.0
+                    }
                 }
             };
             let top = top.min(height - h - 2.0).max(RULER_H + 2.0);
             items.push((
-                Place::Tag { at: frac(hv.t, f.end_s), w: Some(wide + READOUT_GAP), h, top, anchor: if left { Anchor::Before } else { Anchor::After } },
+                Place::Tag {
+                    at: frac(hv.t, f.end_s),
+                    w: Some(wide + READOUT_GAP),
+                    h,
+                    top,
+                    anchor: if left { Anchor::Before } else { Anchor::After },
+                },
                 row([el]).padding(pad),
             ));
         }
@@ -1499,17 +1617,35 @@ impl Timeline {
         let i = d.sample_index(hv.t);
         let picked = self.picked();
         let mut note = None;
-        let line = |color: Color, name: &str, value: String, v: f32, picked: bool| ReadoutLine { color, name: name.to_owned(), value, v, picked };
+        let line = |color: Color, name: &str, value: String, v: f32, picked: bool| ReadoutLine {
+            color,
+            name: name.to_owned(),
+            value,
+            v,
+            picked,
+        };
         let (title, mut lines): (&str, Vec<ReadoutLine>) = match hv.track {
             Track::Ruler | Track::Events | Track::Gap | Track::ListHead => return None,
             Track::Lead => (
                 "Share of metal income",
-                d.sides.iter().enumerate().map(|(s, side)| line(side.color, &side.name, format!("{:.0}%", d.shares[s][i] * 100.0), d.shares[s][i], false)).collect(),
+                d.sides
+                    .iter()
+                    .enumerate()
+                    .map(|(s, side)| {
+                        line(side.color, &side.name, format!("{:.0}%", d.shares[s][i] * 100.0), d.shares[s][i], false)
+                    })
+                    .collect(),
             ),
             Track::Hero => {
                 let def = d.metrics[self.hero()].def;
                 let series = self.hero_series();
-                (def.about, series.iter().map(|(team, name, color, v)| line(*color, name, def.show(v[i]), v[i], team.is_some() && *team == picked)).collect())
+                (
+                    def.about,
+                    series
+                        .iter()
+                        .map(|(team, name, color, v)| line(*color, name, def.show(v[i]), v[i], team.is_some() && *team == picked))
+                        .collect(),
+                )
             }
             Track::Row(m) => {
                 let def = d.metrics.get(m)?.def;
@@ -1552,10 +1688,14 @@ impl Timeline {
                 for l in lines {
                     let name = text(l.name).caption().ellipsis().width(Size::Fill(1.0));
                     body.push(
-                        row([status_dot(l.color), if l.picked { name.semibold() } else { name }, text(l.value).caption().semibold().tabular_numerals()])
-                            .gap(tokens::SPACE_2)
-                            .align(Align::Center)
-                            .height(Size::Fixed(18.0)),
+                        row([
+                            status_dot(l.color),
+                            if l.picked { name.semibold() } else { name },
+                            text(l.value).caption().semibold().tabular_numerals(),
+                        ])
+                        .gap(tokens::SPACE_2)
+                        .align(Align::Center)
+                        .height(Size::Fixed(18.0)),
                     );
                 }
                 body.extend(note.map(small));
@@ -1597,7 +1737,12 @@ impl Timeline {
             if self.can_jump().is_some() {
                 out.push(Chip { at, anchor: Anchor::After, width: 176.0, what: ChipKind::Jump(c) });
             } else {
-                out.push(Chip { at, anchor: if ahead { Anchor::After } else { Anchor::Before }, width: chip_w(c), what: ChipKind::Cursor(c) });
+                out.push(Chip {
+                    at,
+                    anchor: if ahead { Anchor::After } else { Anchor::Before },
+                    width: chip_w(c),
+                    what: ChipKind::Cursor(c),
+                });
             }
         }
         // The moment under the pointer, wherever it does not sit on another chip.
@@ -1620,7 +1765,14 @@ impl Timeline {
     fn position_chips(&self, f: &Frame, items: &mut Vec<(Place, El)>) {
         let dark = Color::srgb_u8(9, 9, 11);
         let chip = |label: String, fill: Color| {
-            text(label).caption().semibold().tabular_numerals().text_color(dark).padding(Sides::xy(7.0, 2.0)).fill(fill).radius(4.0)
+            text(label)
+                .caption()
+                .semibold()
+                .tabular_numerals()
+                .text_color(dark)
+                .padding(Sides::xy(7.0, 2.0))
+                .fill(fill)
+                .radius(4.0)
         };
         for c in self.chips(f) {
             let place = |h: f32, top: f32| Place::Tag { at: c.at, w: None, h, top, anchor: c.anchor };
@@ -1686,14 +1838,25 @@ impl Timeline {
                     .align(Align::Center)
                     .padding(Sides { left: indent, ..Sides::zero() })
                     .width(Size::Fill(1.0))];
-                cells.extend(d.metrics.iter().enumerate().map(|(m, s)| text(s.def.show(value(m))).tabular_numerals().end_text().width(cell_w)));
+                cells.extend(
+                    d.metrics
+                        .iter()
+                        .enumerate()
+                        .map(|(m, s)| text(s.def.show(value(m))).tabular_numerals().end_text().width(cell_w)),
+                );
                 row(cells).align(Align::Center)
             };
             for (s, side) in d.sides.iter().enumerate() {
                 rows.push(line(side.name.clone(), side.color, 0.0, &|m| d.side_values(m, s)[i], side.teams.len() > 1));
                 if side.teams.len() > 1 {
                     for t in &side.teams {
-                        rows.push(line(d.teams[*t].name.clone(), d.teams[*t].color, tokens::SPACE_4, &|m| d.team_values(m, *t)[i], false));
+                        rows.push(line(
+                            d.teams[*t].name.clone(),
+                            d.teams[*t].color,
+                            tokens::SPACE_4,
+                            &|m| d.team_values(m, *t)[i],
+                            false,
+                        ));
                     }
                 }
             }
@@ -1767,7 +1930,11 @@ fn tug(def: MetricDef, vals: &[(Color, f32)], visible: bool, with_bar: bool) -> 
     let value = |v: f32, end: bool| {
         let t = text(if visible { def.show(v) } else { "–".into() }).tabular_numerals().width(Size::Fixed(value_w));
         let t = if end { t.end_text() } else { t };
-        if visible { t } else { t.muted() }
+        if visible {
+            t
+        } else {
+            t.muted()
+        }
     };
     let bar = |vals: &[(Color, f32)]| {
         if visible { share_bar(vals, 6.0) } else { share_bar(&[], 6.0) }.width(Size::Fixed(if with_bar { 70.0 } else { 0.0 }))
@@ -1892,7 +2059,13 @@ mod tests {
     #[test]
     fn data_from_any_source_is_made_safe_to_index() {
         let teams = (0..2)
-            .map(|s| data::Team { name: String::new(), color: tokens::FOREGROUND, faction: Faction::Armada, is_ai: false, side: s })
+            .map(|s| data::Team {
+                name: String::new(),
+                color: tokens::FOREGROUND,
+                faction: Faction::Armada,
+                is_ai: false,
+                side: s,
+            })
             .collect();
         let short = data::Series { def: data::METAL_INCOME, values: vec![vec![1.0, 2.0]] };
         let stray = Marker { t: 5.0, kind: MarkKind::Radar, team: 9, unit: None, note: None, sample: false };
@@ -1905,7 +2078,13 @@ mod tests {
     /// `k` is `k + 1` throughout, so player `others + 1` leads everything.
     fn teams_of(others: usize) -> Timeline {
         let teams: Vec<data::Team> = (0..others + 2)
-            .map(|k| data::Team { name: format!("p{k}"), color: tokens::FOREGROUND, faction: Faction::Armada, is_ai: k >= 2, side: (k >= 2) as usize })
+            .map(|k| data::Team {
+                name: format!("p{k}"),
+                color: tokens::FOREGROUND,
+                faction: Faction::Armada,
+                is_ai: k >= 2,
+                side: (k >= 2) as usize,
+            })
             .collect();
         let metrics = data::REPLAY_METRICS
             .iter()
@@ -2000,9 +2179,20 @@ mod tests {
     #[test]
     fn the_hover_chip_keeps_clear_of_the_other_chips() {
         let mut t = timeline();
-        let frame = |hover| Frame { end_s: 1200.0, w: 1200.0, gutter: 300.0, compact: false, narrow: false, now: Instant::now(), hover, hovered: None };
+        let frame = |hover| Frame {
+            end_s: 1200.0,
+            w: 1200.0,
+            gutter: 300.0,
+            compact: false,
+            narrow: false,
+            now: Instant::now(),
+            hover,
+            hovered: None,
+        };
         let at = |time: f32| Some(Hover { t: time, on_game: false, track: Track::Hero, y: 100.0 });
-        let hover_chip = |t: &Timeline, time: f32| t.chips(&frame(at(time))).into_iter().find(|c| matches!(c.what, ChipKind::Hover(_))).map(|c| c.anchor);
+        let hover_chip = |t: &Timeline, time: f32| {
+            t.chips(&frame(at(time))).into_iter().find(|c| matches!(c.what, ChipKind::Hover(_))).map(|c| c.anchor)
+        };
         // Far from everything: centred on its line.
         assert_eq!(hover_chip(&t, 200.0), Some(Anchor::Center));
         // Just left of the game's chip (centred on 600, 50 wide): it steps aside.
@@ -2133,7 +2323,16 @@ mod tests {
     #[test]
     fn tracks_stack_up_to_the_height_the_overlay_spans() {
         let mut t = teams_of(16);
-        let frame = |compact| Frame { end_s: 1200.0, w: 1200.0, gutter: 300.0, compact, narrow: false, now: Instant::now(), hover: None, hovered: None };
+        let frame = |compact| Frame {
+            end_s: 1200.0,
+            w: 1200.0,
+            gutter: 300.0,
+            compact,
+            narrow: false,
+            now: Instant::now(),
+            hover: None,
+            hovered: None,
+        };
         for per_player in [false, true] {
             t.per_player = per_player;
             let last = t.data.metrics.len() - 1;
@@ -2202,9 +2401,9 @@ mod view_tests {
                     .findings
                     .iter()
                     .filter(|f| {
-                    matches!(f.kind, FindingKind::TextOverflow | FindingKind::DeadTooltip | FindingKind::DuplicateId)
-                        || (f.kind == FindingKind::Overflow && f.message.contains("text cell"))
-                })
+                        matches!(f.kind, FindingKind::TextOverflow | FindingKind::DeadTooltip | FindingKind::DuplicateId)
+                            || (f.kind == FindingKind::Overflow && f.message.contains("text cell"))
+                    })
                     .collect();
                 assert!(serious.is_empty(), "state {k} at {w}x{h}:\n{serious:#?}");
             }
