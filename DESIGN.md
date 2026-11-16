@@ -510,6 +510,11 @@ revisit with real games.
   words ("Jump to 4:00"), which hides fewer labels but drops "everyone", the point of
   the button; moving it into the header beside "Follow the game", which has no room
   for it in a narrow window and parts it from the cursor.
+- **Grid labels** of the large chart sit on a backing of the chart's surface at 72 %
+  opacity, so a line passing under "150" or "50%" still shows, dimmed, while the
+  number reads. REJECTED: the gutter, whose right edge holds the values; a full-width
+  left margin on the chart, which would part the large chart's axis from every other
+  track's.
 
 ## 6. Testing
 

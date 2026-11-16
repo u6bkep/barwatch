@@ -15,7 +15,7 @@ use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const SCENES: [&str; 25] = [
+pub const SCENES: [&str; 26] = [
     "empty",
     "preparing",
     "ready",
@@ -30,6 +30,7 @@ pub const SCENES: [&str; 25] = [
     "timeline-building",
     "timeline-older",
     "timeline-complete",
+    "timeline-grid",
     "timeline-marks",
     "timeline-teams",
     "timeline-unavailable",
@@ -323,6 +324,13 @@ pub fn scene(name: &str) -> Option<Ui> {
         }
         "timeline-complete" => {
             ui.fixture_party(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel))))
+        }
+        // A large chart whose lines run through its grid labels.
+        "timeline-grid" => {
+            ui.fixture_party(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel))));
+            if let Some(timeline) = ui.fixture_timeline() {
+                timeline.fixture_hero("buildPowerUse");
+            }
         }
         "timeline-marks" => {
             let doc = docs::with_made_up_tech(&duel);

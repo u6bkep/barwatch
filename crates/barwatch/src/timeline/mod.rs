@@ -544,6 +544,11 @@ impl Timeline {
         self.per_player = true;
     }
 
+    /// For canned scenes: the large chart on the metric `id`.
+    pub fn fixture_hero(&mut self, id: &'static str) {
+        self.hero = Some(id);
+    }
+
     /// For canned scenes: the cursor at `t`.
     pub fn fixture_cursor(&mut self, t: f32) {
         self.cursor = Some(t);
@@ -1753,9 +1758,17 @@ impl Timeline {
                 .paths
                 .push(PathBuilder::new().move_to(0.0, gy).line_to(f.w, gy).stroke_solid(Color::srgb_u8(39, 39, 42), 1.0).build());
             if level > 0.0 && shown >= 2 {
+                // On a backing of the chart's own surface, thin enough that a
+                // line passing under the number still shows through.
                 items.push((
-                    Place::Tag { at: 0.0, w: None, h: 16.0, top: gy - 16.0, anchor: Anchor::After },
-                    text(def.show(value)).caption().muted().tabular_numerals().padding(Sides { left: 2.0, ..Sides::zero() }),
+                    Place::Tag { at: 0.0, w: None, h: 16.0, top: gy - 17.0, anchor: Anchor::After },
+                    text(def.show(value))
+                        .caption()
+                        .muted()
+                        .tabular_numerals()
+                        .padding(Sides::xy(4.0, 0.0))
+                        .fill(chosen_surface().with_alpha(0.72))
+                        .radius(3.0),
                 ));
             }
         }
