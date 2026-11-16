@@ -152,7 +152,9 @@ graphics, which is how the sync tests were done. Point `--data-dir` at a scratch
 folder that links `pool`, `packages`, `maps` and `rapid` from a real BAR folder.
 
 The window renders without a display: `BARWATCH_FIXTURE=<scene>` picks a canned state
-(`empty`, `preparing`, `ready`, `playing`, `failed`, `replays`, `settings`, `consent`)
+(`empty`, `preparing`, `ready`, `playing`, `failed`, `replays`, `settings`, `consent`,
+and the timeline's `ready-statistics` and `timeline-*`: see `fixtures.rs`; with
+`BARWATCH_FIXTURE_DATA=<BAR data folder>` the marker pictures are read from there)
 and `DAMASCENE_HEADLESS_SHOT=out.png` writes one frame and exits. The same scenes are
 held to damascene's layout lints in the tests.
 

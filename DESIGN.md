@@ -281,6 +281,37 @@ real server or engine.
   installed game (`language/en/units.json`, through the reader of §5.6); barwatchd has
   no game content.
 
+Built (T5, `timeline/doc.rs`, `client.rs` `follow_timeline`):
+- Metrics are the catalog's (`timeline/data.rs`) that the document can fill, in the
+  catalog's order: rows read as BAR's group and column captions run together ("Metal
+  income", "Army value", "Units lost"); rates come from cumulative counters, except
+  income and expense, which use the companion's own reading when there is one; ratios
+  show as percentages and a side's ratio is its players' mean; "Units alive", "Damage
+  rate" and "Actions per minute" are derived and say so, and appear only when every
+  input exists. The `value*` rows carry a note that the stats service counts them.
+- The large chart settles on its metric with the first document that has one and then
+  changes only by the viewer's hand: metal income when the document has it (the number
+  a game turns on), else army value (an older stats service sends the engine's counters
+  only at the end, but its own tally from the first sample), else unit value. Rows: the
+  first tier (income, army and unit value, units alive and killed, damage rate, build
+  power in use), with the second added when fewer than five of the first exist. So the
+  short list changes once, when an older service's game completes: its second-tier
+  rows (storage, defence and economy value, build power) give way to the engine's.
+- The axis is the replay header's length while the document grows and `frames` once it
+  is complete. Samples count only once a frame past their snap window is named.
+- Replacing the data keeps the cursor, the chosen metric (by key), the open list, the
+  picked player (while the same name stands there), "by player" (shown only while a
+  side has several players; the viewer's choice is kept when it does not) and the
+  scales (by metric key, eased; they move only when the drawn peak crosses a round
+  step, which statistics past the game position never do while the future is hidden).
+- Long-poll beside the session's with its 3 s retry, at most one answer per 3 s while
+  building (the server's count moves with nearly every record and each answer is the
+  whole document). A 404 before any answer means a server older than the timeline:
+  shown once as "no statistics", asked again every ten minutes; after one it is
+  passing (or the party is gone) and what was shown stays. An answer over 16 MiB, or
+  one this app cannot parse (a later server's new state or series kind), is shown once
+  as "no statistics" with the reason, and asked again from its `rev` ten minutes on.
+
 ### 5.3 Game position
 
 A reporter widget, shipped inside the app and written at launch to an app-private
@@ -307,6 +338,11 @@ the BAR folder, so a game started from BAR's launcher never sees it.
 - No report for 5 s (user widgets switched off in BAR, engine closed): the timeline
   shows statistics and cursor without a game line, hides nothing, and still offers the
   jump button for any cursor position.
+  CORRECTED (T5): not on its own. A joining engine is silent while it loads, so this
+  would show the whole future to everyone at every join. The game line stays where it
+  was last seen and the future stays hidden; after 5 s of silence once it has reported
+  (30 s before its first report) the timeline says why and offers "Use the timeline
+  without it", which is the mode described above until the next report.
 - When the engine restarts or the session's `run` changes, the position and any jump
   state reset.
 
@@ -317,6 +353,14 @@ false}`. The button shows only when the cursor is at least 10 s ahead of the gam
 no jump is in flight. Every app shows a jump in flight from `SessionView.jump` (§4.3)
 until its own engine reaches the target. A refused request calls
 `Timeline::cancel_jump`.
+
+Built (T5): a jump is "new" when `SessionView.jump` differs from the one named when this
+viewer's engine got into the run, so a jump made before it joined (its engine is
+catching up to the party, not to that jump) or while its engine was closed is not
+shown. Arrival is within 2 s of the target; the server's whole-second name for this
+app's own jump is the same jump. Without a game position nothing can say it arrived:
+shown for at most 90 s while the game may still be loading, 8 s once its silence shows.
+A refusal also shows the server's words as a notice.
 
 ### 5.5 Hover (copied host crate)
 
@@ -370,6 +414,21 @@ to fit it. `Ui` passes the host hook to `Timeline::pointer_moved` (§5.5; it alr
 implements `WinitWgpuApp` with the default), puts `Timeline::layers()` among its root
 overlays, returns the timeline's shaders, and passes on its focus requests. `Proto`
 remains for development and shows the wiring.
+
+Built (T5, `ui.rs`): the default window is 1180×900. While watching, the replay card
+shrinks to one line (map picture, players, where this viewer stands, the party's
+buttons) so the timeline fits above the viewer list. Before this viewer is in the
+game the party view is as before, plus one line on where the statistics stand
+("worked out up to 8:15 of 47:32 so far", queued, none and why). After the replay
+ends the timeline stays, at game over, for those who were in it, until a new run
+starts; a viewer who joins a new run gets it again from the start, with the metric
+and view choices kept. "In game" needs the engine to have been started for the
+party's current run (`Update.engine_run`): one left open after a replay ended is not,
+and the client closes it when a new run starts so that the new one is joined. The
+window redraws every 250 ms while the game line runs between reports, every 50 ms
+while a jump is under way (its spinner), and not at all while nothing moves (measured
+in the hidden rig: 0 % CPU idle, about 5 % for a debug build while the line runs). Pictures and names load once the
+game version is installed and again for each picture name new marks bring.
 
 ### 5.8 Changes the user asked for after seeing the prototype
 

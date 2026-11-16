@@ -23,51 +23,234 @@ use std::path::Path;
 /// How a metric's values read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unit {
-    /// Something per second, from a cumulative counter.
+    /// Something per second: a rate the game reports, or one derived from a
+    /// cumulative counter.
     PerSecond,
+    /// Something per minute of game time.
+    PerMinute,
     /// Whole things.
     Count,
     /// An amount (metal, damage).
     Amount,
+    /// A share of a whole, held as 0 to 1 and written as a percentage. A side's
+    /// value is the mean of its players', where every other unit adds up.
+    Percent,
+}
+
+/// The sections the list of metrics is read in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    Economy,
+    Value,
+    Units,
+    Combat,
+    Activity,
+    Totals,
+}
+
+impl Group {
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Economy => "Economy",
+            Group::Value => "Unit value",
+            Group::Units => "Units",
+            Group::Combat => "Combat",
+            Group::Activity => "Activity",
+            Group::Totals => "Running totals",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct MetricDef {
-    /// Stable name, as a server would send it.
+    /// Stable name: BAR's TeamStats key where the meaning is BAR's.
     pub id: &'static str,
-    /// Short label for a row.
+    /// Short label for a row: the words BAR's panel uses for the same number
+    /// (its group and column captions, "Metal · Income"), run together.
     pub label: &'static str,
-    /// What it is, in a sentence, for the hero chart and hover text.
+    /// What it is, in a few words of our own: hover text and readout titles.
     pub about: &'static str,
+    /// What else a viewer should know about the numbers, or empty.
+    pub note: &'static str,
     pub unit: Unit,
+    pub group: Group,
+    /// A running total since the start of the game, not a state of the moment.
+    pub total: bool,
+    /// Which rows show before the list is opened in full: 1 always, 2 when
+    /// few of the first kind exist, 3 only in the full list.
+    pub tier: u8,
 }
 
 impl MetricDef {
+    const fn new(id: &'static str, label: &'static str, about: &'static str, unit: Unit, group: Group, tier: u8) -> MetricDef {
+        MetricDef { id, label, about, note: "", unit, group, total: false, tier }
+    }
+
+    const fn note(mut self, note: &'static str) -> MetricDef {
+        self.note = note;
+        self
+    }
+
+    const fn total(mut self) -> MetricDef {
+        self.total = true;
+        self
+    }
+
+    /// How the values read, for the line under a chart's title.
+    pub fn reading(&self) -> &'static str {
+        match self.unit {
+            Unit::PerSecond => "Per second",
+            Unit::PerMinute => "Per minute",
+            Unit::Count | Unit::Amount if self.total => "Total so far",
+            Unit::Percent | Unit::Count | Unit::Amount => "",
+        }
+    }
+
     pub fn show(&self, v: f32) -> String {
-        super::axis::number(if self.unit == Unit::Count { v.round() } else { v })
+        match self.unit {
+            Unit::Percent => format!("{:.0}%", v * 100.0),
+            Unit::Count | Unit::PerMinute => super::axis::number(v.round()),
+            Unit::PerSecond | Unit::Amount => super::axis::number(v),
+        }
+    }
+
+    /// The top of a chart whose highest value is `peak`: a round number above
+    /// it, or the whole for a share.
+    pub fn scale_top(&self, peak: f32) -> f32 {
+        match self.unit {
+            Unit::Percent => 1.0,
+            _ => super::axis::nice_ceil(peak * 1.04),
+        }
     }
 }
 
-pub const METAL_INCOME: MetricDef =
-    MetricDef { id: "metalIncome", label: "Metal /s", about: "Metal income per second", unit: Unit::PerSecond };
+/// The unit value series are the stats service's own count: they carry BAR's
+/// names, and BAR's panel sorts units into more classes, so the numbers differ.
+const VALUE_NOTE: &str = "Counted by the stats service, not by BAR: metal cost only, aircraft and ships count as army.";
+
+use Group::*;
+use Unit::*;
+
+pub const METAL_INCOME: MetricDef = MetricDef::new("metalIncome", "Metal income", "Metal income per second", PerSecond, Economy, 1);
 pub const ENERGY_INCOME: MetricDef =
-    MetricDef { id: "energyIncome", label: "Energy /s", about: "Energy income per second", unit: Unit::PerSecond };
-pub const METAL_SPENT: MetricDef =
-    MetricDef { id: "metalExpense", label: "Spent /s", about: "Metal spent per second", unit: Unit::PerSecond };
-pub const UNITS_ALIVE: MetricDef =
-    MetricDef { id: "unitsActive", label: "Units", about: "Units alive", unit: Unit::Count };
-pub const KILLS: MetricDef = MetricDef { id: "unitsKilled", label: "Kills", about: "Enemy units killed", unit: Unit::Count };
-pub const LOSSES: MetricDef = MetricDef { id: "unitsDied", label: "Losses", about: "Own units lost", unit: Unit::Count };
+    MetricDef::new("energyIncome", "Energy income", "Energy income per second", PerSecond, Economy, 1);
+pub const METAL_EXPENSE: MetricDef =
+    MetricDef::new("metalExpense", "Metal expense", "Metal spent per second", PerSecond, Economy, 3);
+pub const ENERGY_EXPENSE: MetricDef =
+    MetricDef::new("energyExpense", "Energy expense", "Energy spent per second", PerSecond, Economy, 3);
+pub const METAL_LEVEL: MetricDef =
+    MetricDef::new("metalLevel", "Metal level", "Metal held, as a share of the room in storage", Percent, Economy, 3);
+pub const ENERGY_LEVEL: MetricDef =
+    MetricDef::new("energyLevel", "Energy level", "Energy held, as a share of the room in storage", Percent, Economy, 3);
+pub const METAL_STORED: MetricDef = MetricDef::new("metalStored", "Metal stored", "Metal held in storage", Amount, Economy, 2);
+pub const ENERGY_STORED: MetricDef = MetricDef::new("energyStored", "Energy stored", "Energy held in storage", Amount, Economy, 2);
+pub const VALUE_ARMY: MetricDef =
+    MetricDef::new("valueArmy", "Army value", "Army value: what the armed mobile units cost", Amount, Value, 1).note(VALUE_NOTE);
+pub const VALUE_DEFENSE: MetricDef =
+    MetricDef::new("valueDefense", "Defense value", "Defense value: what the static defenses cost", Amount, Value, 2)
+        .note(VALUE_NOTE);
+pub const VALUE_ECONOMY: MetricDef =
+    MetricDef::new("valueEconomy", "Economy value", "Economy value: what the energy and metal makers cost", Amount, Value, 2)
+        .note(VALUE_NOTE);
+pub const VALUE_UTILITY: MetricDef =
+    MetricDef::new("valueUtility", "Utility value", "Utility value: what everything else cost", Amount, Value, 3).note(VALUE_NOTE);
+pub const UNIT_VALUE: MetricDef =
+    MetricDef::new("unitValue", "Unit value", "Unit value: what every unit alive cost", Amount, Value, 1).note(VALUE_NOTE);
+pub const UNITS_ALIVE: MetricDef = MetricDef::new("unitsActive", "Units alive", "Units alive", Count, Units, 1)
+    .note("Worked out here: units built, received and captured, less those lost, given away and stolen.");
+pub const UNITS_PRODUCED: MetricDef = MetricDef::new("unitsProduced", "Units produced", "Units built", Count, Units, 2).total();
+pub const KILLS: MetricDef = MetricDef::new("unitsKilled", "Units killed", "Enemy units killed", Count, Units, 1).total();
+pub const LOSSES: MetricDef = MetricDef::new("unitsDied", "Units lost", "Own units lost", Count, Units, 2).total();
+pub const UNITS_CAPTURED: MetricDef =
+    MetricDef::new("unitsCaptured", "Units captured", "Enemy units taken over", Count, Units, 3).total();
+pub const UNITS_STOLEN: MetricDef =
+    MetricDef::new("unitsOutCaptured", "Units stolen", "Own units the enemy took over", Count, Units, 3).total();
+pub const UNITS_RECEIVED: MetricDef =
+    MetricDef::new("unitsReceived", "Units received", "Units handed over by allies", Count, Units, 3).total();
+pub const UNITS_SENT: MetricDef = MetricDef::new("unitsSent", "Units sent", "Units handed to allies", Count, Units, 3).total();
 pub const DAMAGE_RATE: MetricDef =
-    MetricDef { id: "damageRate", label: "Damage /s", about: "Damage dealt per second", unit: Unit::PerSecond };
-pub const DAMAGE: MetricDef =
-    MetricDef { id: "damageDealt", label: "Damage", about: "Damage dealt in total", unit: Unit::Amount };
+    MetricDef::new("damageRate", "Damage rate", "Damage done per second", PerSecond, Combat, 1)
+        .note("Worked out here from the damage total, averaged over 45 seconds: single volleys would make it unreadable.");
+pub const DAMAGE: MetricDef = MetricDef::new("damageDealt", "Damage dealt", "Damage done", Amount, Combat, 3).total();
+pub const DAMAGE_RECEIVED: MetricDef =
+    MetricDef::new("damageReceived", "Damage received", "Damage suffered", Amount, Combat, 3).total();
+pub const BUILD_POWER: MetricDef =
+    MetricDef::new("buildPower", "Build power", "Build power of everything that can build", Amount, Activity, 2);
+pub const BUILD_POWER_USE: MetricDef =
+    MetricDef::new("buildPowerUse", "Build power in use", "Share of the build power that is busy", Percent, Activity, 1);
+pub const ACTIONS_PER_MINUTE: MetricDef =
+    MetricDef::new("actionsPerMinute", "Actions per minute", "Orders given per minute of game time", PerMinute, Activity, 3)
+        .note("Worked out here from the count of orders, over the last minute.");
+pub const METAL_PRODUCED: MetricDef =
+    MetricDef::new("metalProduced", "Metal produced", "Metal gathered", Amount, Totals, 3).total();
+pub const METAL_USED: MetricDef = MetricDef::new("metalUsed", "Metal used", "Metal spent", Amount, Totals, 3).total();
 pub const METAL_WASTED: MetricDef =
-    MetricDef { id: "metalExcess", label: "Wasted", about: "Metal wasted with storage full", unit: Unit::Amount };
+    MetricDef::new("metalExcess", "Metal excess", "Metal lost to a full storage", Amount, Totals, 3).total();
+pub const METAL_SENT: MetricDef = MetricDef::new("metalSent", "Metal sent", "Metal given to allies", Amount, Totals, 3).total();
+pub const METAL_RECEIVED: MetricDef =
+    MetricDef::new("metalReceived", "Metal received", "Metal given by allies", Amount, Totals, 3).total();
+pub const ENERGY_PRODUCED: MetricDef =
+    MetricDef::new("energyProduced", "Energy produced", "Energy gathered", Amount, Totals, 3).total();
+pub const ENERGY_USED: MetricDef = MetricDef::new("energyUsed", "Energy used", "Energy spent", Amount, Totals, 3).total();
+pub const ENERGY_WASTED: MetricDef =
+    MetricDef::new("energyExcess", "Energy excess", "Energy lost to a full storage", Amount, Totals, 3).total();
+pub const ENERGY_SENT: MetricDef =
+    MetricDef::new("energySent", "Energy sent", "Energy given to allies", Amount, Totals, 3).total();
+pub const ENERGY_RECEIVED: MetricDef =
+    MetricDef::new("energyReceived", "Energy received", "Energy given by allies", Amount, Totals, 3).total();
+
+/// Every metric the timeline can show, in the order rows and menus list them.
+/// A source offers some of them; the rest are left out.
+pub const CATALOG: [MetricDef; 37] = [
+    METAL_INCOME,
+    ENERGY_INCOME,
+    METAL_EXPENSE,
+    ENERGY_EXPENSE,
+    METAL_LEVEL,
+    ENERGY_LEVEL,
+    METAL_STORED,
+    ENERGY_STORED,
+    VALUE_ARMY,
+    UNIT_VALUE,
+    VALUE_DEFENSE,
+    VALUE_ECONOMY,
+    VALUE_UTILITY,
+    UNITS_ALIVE,
+    KILLS,
+    LOSSES,
+    UNITS_PRODUCED,
+    UNITS_CAPTURED,
+    UNITS_STOLEN,
+    UNITS_RECEIVED,
+    UNITS_SENT,
+    DAMAGE_RATE,
+    DAMAGE,
+    DAMAGE_RECEIVED,
+    BUILD_POWER_USE,
+    BUILD_POWER,
+    ACTIONS_PER_MINUTE,
+    METAL_PRODUCED,
+    METAL_USED,
+    METAL_WASTED,
+    METAL_SENT,
+    METAL_RECEIVED,
+    ENERGY_PRODUCED,
+    ENERGY_USED,
+    ENERGY_WASTED,
+    ENERGY_SENT,
+    ENERGY_RECEIVED,
+];
+
+/// What the large chart shows until the viewer picks: the first of these a
+/// source offers. Income is the number a game of BAR turns on; a source that
+/// has no income yet (a simulation by an older stats service gives the
+/// engine's counters only at its end) starts on army value, which every
+/// source has from its first sample.
+pub const DEFAULT_HERO: [&str; 3] = [METAL_INCOME.id, VALUE_ARMY.id, UNIT_VALUE.id];
 
 /// The metrics a replay file can give, in the order rows are listed.
 pub const REPLAY_METRICS: [MetricDef; 9] =
-    [METAL_INCOME, ENERGY_INCOME, METAL_SPENT, UNITS_ALIVE, KILLS, LOSSES, DAMAGE_RATE, DAMAGE, METAL_WASTED];
+    [METAL_INCOME, ENERGY_INCOME, METAL_EXPENSE, UNITS_ALIVE, KILLS, LOSSES, DAMAGE_RATE, DAMAGE, METAL_WASTED];
 
 pub struct Team {
     pub name: String,
@@ -102,6 +285,10 @@ pub struct Data {
     pub sides: Vec<Side>,
     pub metrics: Vec<Series>,
     pub markers: Vec<Marker>,
+    /// `metrics` is only a stand-in of zeroes: the source had no metric yet.
+    pub placeholder: bool,
+    /// What the lead strip measures: the best measure these metrics offer.
+    pub lead: Lead,
     /// `[side][sample]`: each side's share of the lead measure, summing to 1.
     pub shares: Vec<Vec<f32>>,
     /// `[sample]`: how hard the fighting is, from 0 to 1.
@@ -110,8 +297,54 @@ pub struct Data {
     pub lead_changes: Vec<(usize, usize)>,
 }
 
+/// What "who is ahead" is measured by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lead {
+    /// Each side's share of the army value. Preferred: metal income pegs to
+    /// one edge in lopsided games, and says little about who is winning a fight.
+    ArmyValue,
+    /// Each side's share of metal income over the last 75 s, for a source
+    /// without army value.
+    MetalIncome,
+    /// Nothing to measure it by: the strip stays level.
+    Nothing,
+}
+
+impl Lead {
+    /// For the strip's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Lead::ArmyValue => "army value",
+            Lead::MetalIncome => "metal income, 75 s",
+            Lead::Nothing => "no measure yet",
+        }
+    }
+
+    /// For the hover readout's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Lead::ArmyValue => "Share of army value",
+            Lead::MetalIncome => "Share of metal income",
+            Lead::Nothing => "Who is ahead",
+        }
+    }
+
+    /// The lead, in share above an even split, at which the strip is full.
+    /// Fixed, so the strip cannot hint at how lopsided the game gets.
+    pub fn full_at(self) -> f32 {
+        match self {
+            Lead::ArmyValue => 0.35,
+            Lead::MetalIncome | Lead::Nothing => 0.125,
+        }
+    }
+}
+
+/// Counted into each side's army value before shares are taken, so the first
+/// scout of the game does not swing the strip to an edge.
+const ARMY_PRIOR: f32 = 300.0;
+
 /// Fallback side colours when the replay names none (colour-blind-checked pair first).
-const FALLBACK: [(u8, u8, u8); 6] =
+pub(super) const FALLBACK: [(u8, u8, u8); 6] =
     [(90, 150, 255), (255, 96, 80), (245, 197, 66), (95, 211, 141), (190, 132, 255), (64, 208, 220)];
 
 /// Two sides' colours closer than this (OKLab distance) are too alike.
@@ -281,7 +514,10 @@ impl Data {
                 v.resize(n, last);
             }
         }
-        if metrics.is_empty() {
+        // The view always has a metric to index; one that is all zeroes when a
+        // source has none (the view then shows no charts at all).
+        let placeholder = metrics.is_empty();
+        if placeholder {
             metrics.push(Series { def: METAL_INCOME, values: vec![vec![0.0; n]; teams.len()] });
         }
         markers.retain(|m| m.team < teams.len() && m.t.is_finite());
@@ -327,11 +563,26 @@ impl Data {
             sides,
             metrics,
             markers,
+            placeholder,
+            lead: Lead::Nothing,
             shares: Vec::new(),
             heat: Vec::new(),
             lead_changes: Vec::new(),
         };
-        data.shares = data.lead_shares(METAL_INCOME.id);
+        data.lead = if data.metric_index(VALUE_ARMY.id).is_some() {
+            Lead::ArmyValue
+        } else if data.metric_index(METAL_INCOME.id).is_some() {
+            Lead::MetalIncome
+        } else {
+            Lead::Nothing
+        };
+        data.shares = match data.lead {
+            Lead::ArmyValue => data.lead_shares(VALUE_ARMY.id, 1, ARMY_PRIOR),
+            Lead::MetalIncome | Lead::Nothing => data.lead_shares(METAL_INCOME.id, LEAD_WINDOW, 0.0),
+        };
+        if placeholder {
+            data.lead = Lead::Nothing;
+        }
         data.heat = data.fight_heat();
         data.lead_changes = lead_changes(&data.shares);
         data
@@ -345,19 +596,39 @@ impl Data {
         &self.metrics[metric].values[team]
     }
 
+    /// A side's value of a metric: its players' added up, or their mean for
+    /// a share of a whole.
     pub fn side_values(&self, metric: usize, side: usize) -> Vec<f32> {
         let m = &self.metrics[metric].values;
-        (0..self.n).map(|i| self.sides[side].teams.iter().map(|t| m[*t].get(i).copied().unwrap_or(0.0)).sum()).collect()
+        let teams = &self.sides[side].teams;
+        let scale = if self.metrics[metric].def.unit == Unit::Percent { 1.0 / teams.len().max(1) as f32 } else { 1.0 };
+        (0..self.n).map(|i| teams.iter().map(|t| m[*t].get(i).copied().unwrap_or(0.0)).sum::<f32>() * scale).collect()
     }
 
-    /// Each side's share of a metric, averaged over a trailing window.
-    fn lead_shares(&self, id: &str) -> Vec<Vec<f32>> {
+    /// The moment of sample `i`. The last sample of a finished game is taken
+    /// when the game ends, short of its place on the grid.
+    pub fn sample_t(&self, i: usize) -> f32 {
+        (i as f32 * self.period_s).min(self.duration_s)
+    }
+
+    /// How many samples lie at or before `t`.
+    pub fn samples_until(&self, t: f32) -> usize {
+        if t < 0.0 {
+            0
+        } else {
+            self.sample_index(t) + 1
+        }
+    }
+
+    /// Each side's share of a metric, summed over a trailing window of
+    /// `window` samples, every side counted with `prior` more than it has.
+    fn lead_shares(&self, id: &str, window: usize, prior: f32) -> Vec<Vec<f32>> {
         let k = self.sides.len().max(1);
         let even = 1.0 / k as f32;
         let mut shares = vec![vec![even; self.n]; self.sides.len()];
         let Some(m) = self.metric_index(id) else { return shares };
         let per_side: Vec<Vec<f32>> = (0..self.sides.len()).map(|s| self.side_values(m, s)).collect();
-        let window = |v: &Vec<f32>, i: usize| -> f32 { v[i.saturating_sub(LEAD_WINDOW - 1)..=i].iter().sum() };
+        let window = |v: &Vec<f32>, i: usize| -> f32 { v[i.saturating_sub(window - 1)..=i].iter().sum::<f32>() + prior };
         for i in 0..self.n {
             let total: f32 = per_side.iter().map(|v| window(v, i)).sum();
             if total > 0.0 {
@@ -390,7 +661,11 @@ impl Data {
     /// The last sample at or before `t`: what the numbers say at that moment.
     /// Values between samples are not invented.
     pub fn sample_index(&self, t: f32) -> usize {
-        ((t / self.period_s).floor().max(0.0) as usize).min(self.n.saturating_sub(1))
+        let last = self.n.saturating_sub(1);
+        if t >= self.duration_s {
+            return last;
+        }
+        ((t / self.period_s).floor().max(0.0) as usize).min(last)
     }
 
     /// Made-up milestones for trying the design, every one flagged as a sample.
@@ -461,6 +736,15 @@ impl Data {
         }
         self.markers.extend(out);
         self.markers.sort_by(|a, b| a.t.total_cmp(&b.t));
+    }
+
+    /// The pictures the markers ask for: the units that set them off, and the
+    /// skull of a team that is out.
+    pub fn marker_pictures(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.markers.iter().filter_map(|m| m.picture().map(str::to_owned)).collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Every picture name the markers could ask for, for loading icons up front.

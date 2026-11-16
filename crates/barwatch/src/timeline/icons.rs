@@ -50,13 +50,9 @@ impl Icons {
         self.by_name.len()
     }
 
-    /// Decodes a JPEG picture, the form a server sends unit pictures in.
-    // For the server feed to come.
-    #[allow(dead_code)]
-    pub fn insert_jpeg(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
-        let rgba = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)?.to_rgba8();
-        self.insert(name, keep(rgba));
-        Ok(())
+    /// Takes over the pictures of `more`.
+    pub fn merge(&mut self, more: Icons) {
+        self.by_name.extend(more.by_name);
     }
 
     /// DEVELOPMENT FIXTURE: reads the named pictures from a checkout of the
@@ -239,6 +235,13 @@ impl Loading {
             let _ = tx.send(Err(anyhow::Error::new(e).context("starting to read the game's pictures")));
             return Loading { rx };
         }
+        Loading { rx }
+    }
+
+    /// A load that is already over, with this result.
+    pub fn ready(result: Result<GameArt>) -> Loading {
+        let (tx, rx) = mpsc::channel();
+        let _ = tx.send(result);
         Loading { rx }
     }
 
