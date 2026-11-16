@@ -564,6 +564,7 @@ dependencies = [
  "damascene-core",
  "dirs",
  "image",
+ "libc",
  "rand 0.9.5",
  "reqwest",
  "serde",

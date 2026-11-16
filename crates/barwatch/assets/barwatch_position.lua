@@ -15,6 +15,14 @@
 -- With no standard output to write to, the widget stays silent and the app shows
 -- the position as unknown.
 --
+-- It also leaves the game when the app asks: once a second it looks for the file
+-- QUIT_FILE, which the app creates in its own folder (the one this widget is in)
+-- when the viewer leaves the party, and quits as the game's own menu does. (A
+-- widget can look for raw files only under LuaUI/, in any of the engine's data
+-- folders.) A game that quits this
+-- way tells the server it is going; one that is killed is listed as in the game
+-- until its connection times out.
+--
 -- Part of barwatch, MIT OR Apache-2.0.
 
 function widget:GetInfo()
@@ -41,10 +49,13 @@ local INTERVAL = 1.0
 -- own pause flag stays off), so a game that has not moved for this long is
 -- reported as paused. Frames come every 0.11 s at the slowest speed, 0.3x.
 local STALL = 0.5
+-- The app's request to leave.
+local QUIT_FILE = "LuaUI/barwatch_quit"
 
 local lastFrame, frameTimer
 local rawSpeed, speedText
 local lastTimer, lastSpeed, lastPaused
+local quitting = false
 
 function widget:Initialize()
 	-- Only ever a watcher: never part of a game being played.
@@ -68,5 +79,9 @@ function widget:Update()
 		lastTimer, lastSpeed, lastPaused = now, speedText, paused
 		stdout:write(format("[barwatch] f=%d speed=%s paused=%d\n", frame, speedText, paused))
 		stdout:flush()
+		if not quitting and VFS.FileExists(QUIT_FILE, VFS.RAW) then
+			quitting = true
+			Spring.SendCommands("quitforce")
+		end
 	end
 end

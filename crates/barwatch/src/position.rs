@@ -196,6 +196,16 @@ fn engine_safe(dir: &Path) -> bool {
     dir.is_absolute() && !text.contains(special) && !text.contains("  ")
 }
 
+/// The app's request to its engine's widget to leave the game, under the widget
+/// folder ([`widget_dir`]), which the engine has among its data folders: a widget
+/// may look for raw files only under `LuaUI/`. One engine runs per user at a time.
+pub const QUIT_FILE: &str = "LuaUI/barwatch_quit";
+
+/// Where the request to leave goes ([`QUIT_FILE`]).
+pub fn quit_file() -> Option<PathBuf> {
+    Some(widget_dir()?.join(QUIT_FILE))
+}
+
 /// The folder the widget is written to: `<local data>/barwatch/engine-extra`.
 pub fn widget_dir() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("barwatch").join("engine-extra"))
@@ -352,5 +362,7 @@ mod tests {
     fn widget_speaks_the_format_we_read() {
         assert!(WIDGET.contains(r#""[barwatch] f=%d speed=%s paused=%d\n""#));
         assert!(WIDGET.contains("Spring.IsReplay() or Spring.GetSpectatingState()"));
+        assert!(WIDGET.contains(&format!(r#"local QUIT_FILE = "{QUIT_FILE}""#)));
+        assert!(WIDGET.contains(r#"Spring.SendCommands("quitforce")"#));
     }
 }

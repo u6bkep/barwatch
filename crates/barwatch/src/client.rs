@@ -102,6 +102,11 @@ enum Internal {
 
 /// How often the server hears from us; it forgets a viewer after 30 s of silence.
 const HEARTBEAT: Duration = Duration::from_secs(10);
+/// How long the engine is given to leave the game when asked through its
+/// widget, which looks once a second; then how long after the signal.
+const QUIT_BY_WIDGET: Duration = Duration::from_millis(2500);
+#[cfg(unix)]
+const QUIT_BY_SIGNAL: Duration = Duration::from_millis(2500);
 
 struct Client {
     http: reqwest::Client,
@@ -300,8 +305,8 @@ pub async fn run(
     statistics.abort();
     provisioner.abort();
     stop_following(&mut positions, &mut update.position);
-    if let Some(mut c) = child {
-        let _ = c.start_kill();
+    if let Some(c) = child {
+        close_engine(c, position::quit_file().as_deref()).await;
     }
     let _ = client.http.delete(client.session_url(&format!("/viewers/{viewer_id}"))).timeout(Duration::from_secs(5)).send().await;
 }
@@ -312,6 +317,42 @@ async fn wait(child: &mut Option<tokio::process::Child>) {
             let _ = c.wait().await;
         }
         None => std::future::pending().await,
+    }
+}
+
+/// Whether `child` ends within `within`.
+async fn gone(child: &mut tokio::process::Child, within: Duration) -> bool {
+    tokio::time::timeout(within, child.wait()).await.is_ok()
+}
+
+/// Closes our engine so that it leaves the game first: killed outright, the
+/// dedicated server lists it as in the game until its connection times out
+/// (about two minutes), while an engine that quits tells the server so.
+///
+/// In turn: the widget the app installs quits as the game's menu does when it
+/// sees `quit_file` ([`position::QUIT_FILE`]; every platform, but only once the game has loaded and with
+/// user widgets on); on Unix, SIGTERM, which the windowed engine's SDL takes as
+/// the window being closed (the headless engine has no handler and just ends);
+/// and last, a kill.
+async fn close_engine(mut child: tokio::process::Child, quit_file: Option<&Path>) {
+    let asked = quit_file.is_some_and(|f| std::fs::write(f, b"barwatch: leave the game\n").is_ok());
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut closed = asked && gone(&mut child, QUIT_BY_WIDGET).await;
+    #[cfg(unix)]
+    if !closed {
+        if let Some(pid) = child.id().and_then(|id| libc::pid_t::try_from(id).ok()) {
+            // SAFETY: a plain signal to our own child, which has not been
+            // waited for yet, so its pid is still its own.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            closed = gone(&mut child, QUIT_BY_SIGNAL).await;
+        }
+    }
+    if !closed {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    if let Some(f) = quit_file {
+        let _ = std::fs::remove_file(f);
     }
 }
 
@@ -389,6 +430,7 @@ impl Client {
         self.settings.data.root.join("barwatch_engine.log")
     }
 
+
     /// Starts the engine as a spectator of the running party.
     fn launch(&self, engine_dir: &Path, session: &SessionView, name: &str) -> Result<tokio::process::Child> {
         let port = session.game_port.context("the server did not say which port to connect to")?;
@@ -411,6 +453,14 @@ impl Client {
         };
         let log_path = self.engine_log();
         let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+        // A request to leave left over from an engine before (the app was
+        // killed while closing it) would end this one at once.
+        if let Some(quit) = position::quit_file() {
+            match std::fs::remove_file(&quit) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("removing {}: {e}", quit.display()),
+                _ => {}
+            }
+        }
         if let Some(program) = stand_in_engine() {
             return tokio::process::Command::new(&program)
                 .arg(self.session_url("").as_str())
@@ -732,6 +782,38 @@ pub async fn create_session(http: &reqwest::Client, server: &Url, token: &str, r
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine stand-in that leaves when the widget's file appears is let
+    /// go at once and the file cleared; one that does not is signalled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaving_asks_the_engine_first_and_signals_it_only_then() {
+        let dir = std::env::temp_dir().join(format!("barwatch-close-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let quit = dir.join("barwatch_quit");
+        let script = format!("while [ ! -e '{}' ]; do sleep 0.05; done", quit.display());
+        let child = tokio::process::Command::new("sh").arg("-c").arg(script).spawn().unwrap();
+        let started = Instant::now();
+        close_engine(child, Some(&quit)).await;
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(!quit.exists(), "the request does not outlive the engine");
+        // Deaf to the file (user widgets off): SIGTERM, which the game takes as
+        // its window closing.
+        let child = tokio::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let started = Instant::now();
+        close_engine(child, Some(&quit)).await;
+        let took = started.elapsed();
+        assert!(took >= QUIT_BY_WIDGET && took < QUIT_BY_WIDGET + QUIT_BY_SIGNAL, "{took:?}");
+        // Deaf to both: killed.
+        let child = tokio::process::Command::new("sh").arg("-c").arg("trap '' TERM; sleep 30").spawn().unwrap();
+        // Time for the shell to set its trap before the signal comes.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = Instant::now();
+        close_engine(child, None).await;
+        let took = started.elapsed();
+        assert!(took >= QUIT_BY_SIGNAL && took < QUIT_BY_SIGNAL + Duration::from_secs(2), "{took:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn reports_follow_the_stage() {

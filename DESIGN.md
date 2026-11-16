@@ -345,6 +345,10 @@ the BAR folder, so a game started from BAR's launcher never sees it.
   without it", which is the mode described above until the next report.
 - When the engine restarts or the session's `run` changes, the position and any jump
   state reset.
+- The widget also leaves the game when the app asks (§5.9): once a second it looks for
+  `LuaUI/barwatch_quit` (a widget may look for raw files only under `LuaUI/`, in any
+  data folder; the app writes it in its own widget folder, never BAR's) and sends
+  `quitforce`, as BAR's own menu does.
 
 ### 5.4 Jump
 
@@ -515,6 +519,25 @@ revisit with real games.
   number reads. REJECTED: the gutter, whose right edge holds the values; a full-width
   left margin on the chart, which would part the large chart's axis from every other
   track's.
+- **Leaving leaves the game.** Leave used to kill the engine, and the dedicated server
+  listed the viewer as in the game until its connection timed out (measured: 122 s, and
+  a party whose last viewer left that way ran on for as long). Now the app asks in
+  turn, each step only if the one before did not close the engine: the widget's quit
+  file (2.5 s; every platform, once the game has loaded with user widgets on), then on
+  Unix SIGTERM (2.5 s), then a kill; the quit file is removed afterwards and before
+  every launch. Measured with real engines (2026.07.04) against a local barwatchd, two
+  viewers in one party: through the widget the engine logs `[QuitAction] user exited
+  to system`, shuts down in order, and the server drops it within 2 s, headless and
+  windowed alike (and closes a party whose last viewer left within 5 s). SIGTERM: the
+  windowed engine takes it as its window closing (SDL) and leaves the same way within
+  1 s; the headless engine has no handler and dies as if killed (a 2 min ghost), which
+  is why the widget goes first. An engine still loading is not yet listed by the
+  server; it takes SIGTERM but finishes loading before acting on it, so it is killed
+  after the 5 s. Windows: the widget, then the kill (untested there; no signal to send,
+  and closing the window through the window system was not tried). REJECTED: SIGTERM
+  first (kills the headless engine outright); `/quit` from the app, which the engine
+  accepts only from its own console; the quit file in the BAR folder's `LuaUI/`, which
+  works but puts a file of ours into BAR's folder.
 
 ## 6. Testing
 
