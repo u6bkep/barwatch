@@ -24,22 +24,24 @@
 pub mod axis;
 mod data;
 mod dds;
-mod icons;
+mod doc;
+pub mod icons;
 mod marks;
 mod paint;
 mod proto;
 
 pub use data::{Data, MetricDef};
-pub use icons::Icons;
+pub use doc::{feed, statistics};
+pub use icons::{Icons, UnitNames};
 #[cfg(test)]
 use marks::{Faction, MarkKind};
 pub use marks::{MarkClass, Marker};
 pub use paint::shaders;
 pub use proto::{Proto, ProtoOptions};
 
-use axis::{clock, frac, horizon, nice_ceil, number, Eased};
+use axis::{clock, frac, horizon, Eased};
 use damascene_core::prelude::*;
-use damascene_core::widgets::{collapsible, select, switch, toggle};
+use damascene_core::widgets::{collapsible, popover, select, switch, toggle};
 use marks::cluster;
 use paint::{placed, quad, Anchor, Place};
 use std::cell::{Cell, RefCell};
@@ -53,6 +55,11 @@ const KEY_ROW: &str = "tl:row";
 const KEY_PLAYER: &str = "tl:player";
 /// The large chart's title, which is also the control that picks its metric.
 const KEY_METRIC: &str = "tl:metric";
+/// The row under the metric rows that opens the list in full, or closes it.
+const KEY_MORE: &str = "tl:more";
+/// Use the timeline without a game position, and go back to waiting for one.
+const KEY_FREE: &str = "tl:free";
+const KEY_UNFREE: &str = "tl:unfree";
 
 const RULER_H: f32 = 30.0;
 const LANE_H: f32 = 32.0;
@@ -63,7 +70,21 @@ const HERO_GAP_H: f32 = 10.0;
 /// The line between the large chart and the rows that says what the rows' marks choose.
 const LIST_HEAD_H: f32 = 24.0;
 const ROW_H: f32 = 34.0;
+/// The line under the rows that opens the list in full.
+const MORE_H: f32 = 30.0;
 const BADGE: f32 = 26.0;
+/// The column of labels and readouts left of the tracks. Wide enough for a
+/// row to name its metric in full beside its numbers ("Build power in use"):
+/// a name cut short is a row nobody can read.
+const GUTTER: f32 = 320.0;
+/// The same in a window narrower than [`NARROW_BELOW`], where the rows give
+/// up their bars and the longest names their endings.
+const GUTTER_NARROW: f32 = 236.0;
+const NARROW_BELOW: f32 = 900.0;
+/// In a row's gutter: a number, and the bar between a row's two numbers.
+const ROW_VALUE_W: f32 = 42.0;
+const ROW_VALUE_NARROW_W: f32 = 38.0;
+const ROW_BAR_W: f32 = 44.0;
 /// Below this window height only the strip is shown.
 const COMPACT_BELOW: f32 = 460.0;
 /// A cursor this close to the game line or to a marker (px) snaps onto it.
@@ -80,6 +101,17 @@ const READOUT_W: f32 = 236.0;
 const READOUT_GAP: f32 = 14.0;
 /// The most lines of values a hover readout lists.
 const READOUT_ROOM: usize = 6;
+/// With fewer first-tier metrics than this, the rows shown before the list
+/// is opened in full take the second tier along.
+const FEW_ROWS: usize = 5;
+/// A game that has never said where it is may still be loading: only after
+/// this long does the timeline say so and offer to do without.
+const LOADING_GRACE: Duration = Duration::from_secs(30);
+/// Without a game position there is no telling when a jump has arrived: it is
+/// shown for this long (a real engine caught up four minutes in under five seconds).
+const BLIND_JUMP_SHOWN: Duration = Duration::from_secs(8);
+/// Statistics this far behind the game are worth a word in the header.
+const LAG_WORTH_SAYING_S: f32 = 30.0;
 
 /// The cursor's colour, apart from every team colour and from the game's white.
 fn cursor_color() -> Color {
@@ -144,6 +176,8 @@ enum Track {
     /// The line above the rows; the same.
     ListHead,
     Row(usize),
+    /// The line under the rows that opens the list in full; nothing to read.
+    More,
 }
 
 impl Track {
@@ -156,6 +190,7 @@ impl Track {
             "hero" => Some(Track::Hero),
             "gap" => Some(Track::Gap),
             "list" => Some(Track::ListHead),
+            "more" => Some(Track::More),
             row => row.strip_prefix("row")?.parse().ok().map(Track::Row),
         }
     }
@@ -195,6 +230,32 @@ struct Shown {
     tracks_h: f32,
 }
 
+/// Where the statistics stand, as the server last said (`api::TimelineState`),
+/// or as a host that has them all at hand says.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum Feed {
+    /// The server has not answered yet.
+    #[default]
+    Asking,
+    /// There are none to be had, and why, in words for the viewer.
+    Unavailable(String),
+    /// The stats service has the game and has not started on it.
+    Queued,
+    /// Being worked out: they grow.
+    Building,
+    /// The whole game.
+    Complete,
+    /// The stats service could not process the game, and why.
+    Failed(String),
+}
+
+impl Feed {
+    /// No more will come than there is now.
+    fn stopped(&self) -> bool {
+        matches!(self, Feed::Unavailable(_) | Feed::Failed(_))
+    }
+}
+
 /// What the timeline asks of whoever hosts it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -205,22 +266,37 @@ pub enum Action {
 #[derive(Default)]
 struct Motion {
     horizon: Option<Eased>,
-    tops: HashMap<(usize, bool), Eased>,
+    tops: HashMap<(&'static str, bool), Eased>,
     moving: bool,
     last: Option<Instant>,
 }
 
 pub struct Timeline {
     pub data: Data,
+    /// There are statistics to show: `data` came from a source. Without, the
+    /// timeline is a ruler to look along and jump by, and `data` only its length.
+    has_data: bool,
+    feed: Feed,
     icons: Icons,
-    /// Where the game is, in game seconds.
+    unit_names: UnitNames,
+    /// Where the game is, in game seconds: as last reported.
     game_s: f32,
+    /// The game has said where it is at least once since it started.
+    reported: bool,
+    /// Since when the game has not been saying where it is; `None` while it does.
+    silent_since: Option<Instant>,
+    /// The viewer chose to use the timeline without a game position: no game
+    /// line, nothing hidden, a jump from any cursor. Ends with the next report.
+    free: bool,
     /// What the readouts show; `None` follows the game.
     cursor: Option<f32>,
     hide_future: bool,
     per_player: bool,
-    /// The metric of the large chart, as an index into `data.metrics`.
-    hero: usize,
+    /// The metric of the large chart, by id: the viewer's choice, or the
+    /// default settled on when the first statistics came. `None` before.
+    hero: Option<&'static str>,
+    /// Every metric has its row, not only the first few.
+    rows_open: bool,
     /// A team picked out in the large chart; the others dim.
     picked: Option<usize>,
     /// The target of a jump that has been asked for and not arrived at yet.
@@ -262,16 +338,31 @@ impl Frame {
 }
 
 impl Timeline {
+    /// A timeline on statistics that are all there (a replay file).
     pub fn new(data: Data) -> Timeline {
-        let hero = data.metric_index(data::METAL_INCOME.id).unwrap_or(0);
+        let mut timeline = Timeline::waiting(data.duration_s);
+        timeline.set_statistics(Feed::Complete, Some(data));
+        timeline
+    }
+
+    /// A timeline of a game `duration_s` long whose statistics are still to
+    /// come ([`Timeline::set_statistics`]): a ruler to look along and jump by.
+    pub fn waiting(duration_s: f32) -> Timeline {
         Timeline {
-            data,
+            data: Data::assemble(duration_s.max(1.0), 15.0, 1, Vec::new(), Vec::new(), Vec::new()),
+            has_data: false,
+            feed: Feed::Asking,
             icons: Icons::default(),
+            unit_names: UnitNames::default(),
             game_s: 0.0,
+            reported: false,
+            silent_since: None,
+            free: false,
             cursor: None,
             hide_future: true,
             per_player: false,
-            hero,
+            hero: None,
+            rows_open: false,
             picked: None,
             jump: None,
             jump_asked: None,
@@ -318,12 +409,106 @@ impl Timeline {
         if !self.metric_open || !self.shown.get().hero {
             return Vec::new();
         }
-        let options = self.data.metrics.iter().enumerate().map(|(m, s)| (m, s.def.about));
-        vec![select::select_menu_selected(KEY_METRIC, options, &self.hero())]
+        vec![self.metric_menu()]
+    }
+
+    /// The list under the large chart's title: every metric there is, under
+    /// the heading of its group, the chosen one checked.
+    fn metric_menu(&self) -> El {
+        let chosen = self.hero();
+        let mut items: Vec<El> = Vec::new();
+        let mut group = None;
+        for (m, series) in self.data.metrics.iter().enumerate() {
+            let def = series.def;
+            if group != Some(def.group) {
+                group = Some(def.group);
+                items.push(
+                    text(def.group.label())
+                        .caption()
+                        .muted()
+                        .padding(Sides { left: tokens::SPACE_2, top: tokens::SPACE_2, bottom: 2.0, right: tokens::SPACE_2 }),
+                );
+            }
+            items.push(
+                popover::menu_item_checked(def.label, m == chosen)
+                    .key(select::select_option_key(KEY_METRIC, &def.id))
+                    .role(Role::Option)
+                    .aria_selected(m == chosen),
+            );
+        }
+        let panel = popover::popover_panel(items).role(Role::Listbox).min_width_of_anchor();
+        popover::popover(KEY_METRIC, popover::Anchor::below_key(KEY_METRIC), panel)
     }
 
     pub fn set_icons(&mut self, icons: Icons) {
         self.icons = icons;
+    }
+
+    /// The names BAR shows for units, for marker text; a marker whose unit
+    /// has none keeps its definition's name.
+    pub fn set_unit_names(&mut self, names: UnitNames) {
+        self.unit_names = names;
+    }
+
+    /// Where the statistics stand, and the statistics themselves once there
+    /// are some. Called again whenever a server has more: what the viewer
+    /// has set up (the cursor, the chosen metric, a picked player, by side
+    /// or by player, the open list) stays as it is wherever the new data
+    /// still has it.
+    pub fn set_statistics(&mut self, feed: Feed, data: Option<Data>) {
+        self.feed = feed;
+        let Some(data) = data else {
+            if std::mem::take(&mut self.has_data) {
+                // They were there and are gone (a server started over).
+                self.data = Data::assemble(self.data.duration_s, 15.0, 1, Vec::new(), Vec::new(), Vec::new());
+            }
+            return;
+        };
+        // A picked player stays picked while it is the same player. "By
+        // player" stays the viewer's choice; it shows only where a side has
+        // several players ([`Timeline::by_player`]), and so does its toggle.
+        let same = |p: usize| self.data.teams.get(p).map(|t| &t.name) == data.teams.get(p).map(|t| &t.name);
+        if !self.picked.is_some_and(same) {
+            self.picked = None;
+        }
+        self.data = data;
+        self.has_data = true;
+        self.game_s = self.game_s.min(self.data.duration_s);
+        // A game that turned out shorter than the header said.
+        self.cursor = self.cursor.map(|c| c.min(self.horizon_s().max(self.data.duration_s)));
+        // The large chart settles on a metric with the first statistics and
+        // then stays on it: what it shows changes only by the viewer's hand.
+        // Not on the stand-in of a document that has no metric yet.
+        if self.hero.is_none() && !self.data.placeholder {
+            self.hero = data::DEFAULT_HERO
+                .iter()
+                .find_map(|id| self.data.metric_index(id))
+                .or(Some(0))
+                .map(|m| self.data.metrics[m].def.id);
+        }
+    }
+
+    /// For canned scenes: the view by player.
+    pub fn fixture_by_player(&mut self) {
+        self.per_player = true;
+    }
+
+    /// For canned scenes: as if the game had been silent for this long.
+    pub fn fixture_silent_for(&mut self, time: Duration) {
+        self.silent_since = Instant::now().checked_sub(time);
+    }
+
+    /// A new run of the game (it was started again, or this viewer's engine
+    /// was): the position, the cursor and any jump start over; what the
+    /// viewer chose to look at stays.
+    pub fn restart(&mut self) {
+        self.game_s = 0.0;
+        self.reported = false;
+        self.silent_since = None;
+        self.free = false;
+        self.cursor = None;
+        self.jump = None;
+        self.jump_asked = None;
     }
 
     pub fn game_s(&self) -> f32 {
@@ -342,6 +527,13 @@ impl Timeline {
     pub fn set_game(&mut self, game_s: f32) {
         let before = self.game_s;
         self.game_s = game_s.clamp(0.0, self.data.duration_s);
+        self.reported = true;
+        self.silent_since = None;
+        if std::mem::take(&mut self.free) {
+            // The cursor stood in for the game; it is the viewer's again only
+            // where it differs from where the game turns out to be.
+            self.cursor = self.cursor.filter(|c| (c - self.game_s).abs() > 0.75);
+        }
         let over = self.game_s >= self.data.duration_s;
         // Arrived (a server may land a little short, on a keyframe), or given up on.
         let stale = self.jump_asked.is_some_and(|t| t.elapsed() > JUMP_GIVE_UP);
@@ -359,21 +551,65 @@ impl Timeline {
         }
     }
 
+    /// The game is not saying where it is: it has not started, the viewer
+    /// has user widgets switched off in BAR, or it is stuck. Called in place
+    /// of [`Timeline::set_game`] for as long as that lasts. The game line
+    /// stays where it last was and the future stays hidden; after a while
+    /// the timeline says so and offers to do without a game position.
+    pub fn set_game_silent(&mut self) {
+        self.silent_since.get_or_insert_with(Instant::now);
+        // Nothing will say that a jump has arrived. A game that may still be
+        // loading may yet say so; once its silence shows, it will not, and a
+        // jump shown on for long would hold back the next one.
+        let shown_for = if self.free || self.silence_shows() { BLIND_JUMP_SHOWN } else { JUMP_GIVE_UP };
+        if self.jump_asked.is_some_and(|t| t.elapsed() > shown_for) {
+            self.jump = None;
+            self.jump_asked = None;
+        }
+    }
+
+    /// The game has been silent long enough to say so.
+    fn silence_shows(&self) -> bool {
+        let grace = if self.reported { Duration::ZERO } else { LOADING_GRACE };
+        self.silent_since.is_some_and(|since| since.elapsed() >= grace)
+    }
+
     /// The host tells the timeline a jump will not happen (refused, or failed).
-    // For the party view, once a server can refuse a jump.
-    #[allow(dead_code)]
     pub fn cancel_jump(&mut self) {
         self.jump = None;
         self.jump_asked = None;
     }
 
-    fn ask_jump(&mut self) -> Option<Action> {
-        let target = self.can_jump()?;
+    /// A jump is under way that this timeline did not ask for (another
+    /// viewer did): shown like its own until the game gets there.
+    pub fn show_jump(&mut self, target_s: f32) {
+        let target = target_s.clamp(0.0, self.data.duration_s);
+        // This timeline's own jump, as the server names it (in whole seconds).
+        if self.jumping_near(target) {
+            return;
+        }
+        if !self.free && target <= self.game_s + JUMP_TOLERANCE_S {
+            return;
+        }
         self.jump = Some(target);
         self.jump_asked = Some(Instant::now());
+    }
+
+    /// A jump is under way to about `t`: the cursor that asked for it, or
+    /// the server's word for the same jump.
+    fn jumping_near(&self, t: f32) -> bool {
+        self.jump.is_some_and(|j| (j - t).abs() < JUMP_TOLERANCE_S)
+    }
+
+    fn ask_jump(&mut self) -> Option<Action> {
         // The axis may reach past the real end while the future is hidden; the
-        // server gets no further than the end either way.
-        Some(Action::Jump(target.min(self.data.duration_s)))
+        // server gets no further than the end either way, and the cursor and the
+        // jump stand where it will land.
+        let target = self.can_jump()?.min(self.data.duration_s);
+        self.cursor = Some(target);
+        self.jump = Some(target);
+        self.jump_asked = Some(Instant::now());
+        Some(Action::Jump(target))
     }
 
     /// The key the host should focus (via `App::drain_focus_requests`) so the
@@ -382,16 +618,26 @@ impl Timeline {
         self.focus_request.take()
     }
 
+    /// Whether what the game has not reached is hidden: the viewer's switch,
+    /// which has nothing to go by without a game position.
+    fn hiding(&self) -> bool {
+        self.hide_future && !self.free
+    }
+
+    /// The game has got far enough for there to be numbers.
+    fn started(&self) -> bool {
+        self.free || self.game_s >= self.data.period_s
+    }
+
     /// Whether the numbers at `t` may be shown.
     pub fn revealed(&self, t: f32) -> bool {
-        (!self.hide_future || t <= self.game_s) && t <= self.data.computed_s
+        self.has_data && (!self.hiding() || t <= self.game_s) && t <= self.data.computed_s
     }
 
     /// How many samples may be drawn: those the game has passed, or all.
     pub fn drawable_samples(&self) -> usize {
-        let limit = if self.hide_future { self.game_s } else { self.data.duration_s };
-        let limit = limit.min(self.data.computed_s);
-        ((limit / self.data.period_s).floor().max(0.0) as usize + 1).min(self.data.n)
+        let limit = if self.hiding() { self.game_s } else { self.data.duration_s };
+        self.data.samples_until(limit.min(self.data.computed_s)).min(self.data.n)
     }
 
     /// The moment the readouts show: the cursor, or the game (held back to the
@@ -402,12 +648,14 @@ impl Timeline {
 
     /// Why the numbers at `t` are not shown, if they are not.
     fn hidden_reason(&self, t: f32) -> Option<&'static str> {
-        if self.game_s < self.data.period_s {
+        if !self.has_data {
+            Some("No statistics")
+        } else if !self.started() {
             Some("Waiting for the first numbers")
-        } else if self.hide_future && t > self.game_s {
+        } else if self.hiding() && t > self.game_s {
             Some("Hidden until the game gets there")
         } else if t > self.data.computed_s {
-            Some("Still being worked out")
+            Some(if self.feed.stopped() { "No statistics from here on" } else { "Still being worked out" })
         } else {
             None
         }
@@ -416,40 +664,77 @@ impl Timeline {
     /// How many samples the game has passed: the played part of a line. When
     /// the future is shown, the rest is drawn too, but quieter.
     fn played_samples(&self) -> usize {
-        let limit = self.game_s.min(self.data.computed_s);
-        ((limit / self.data.period_s).floor().max(0.0) as usize + 1).min(self.data.n)
+        if self.free {
+            return self.drawable_samples();
+        }
+        self.data.samples_until(self.game_s.min(self.data.computed_s)).min(self.data.n)
     }
 
     /// The axis length the rules allow right now (before easing).
     pub fn horizon_s(&self) -> f32 {
-        horizon(self.game_s, self.data.duration_s, self.hide_future)
+        horizon(self.game_s, self.data.duration_s, self.hiding())
     }
 
-    /// The metric of the large chart. Checked against the data, which a host
-    /// may replace with one that has fewer metrics (never none).
+    /// The metric of the large chart, as an index into `data.metrics`:
+    /// the one settled on, or the first where the data does not have it
+    /// (a host may replace the data with one that has fewer; never none).
     fn hero(&self) -> usize {
-        self.hero.min(self.data.metrics.len().saturating_sub(1))
+        self.hero.and_then(|id| self.data.metric_index(id)).unwrap_or(0)
+    }
+
+    /// Whether the view is by player: the viewer's choice, where a side has
+    /// several players to tell apart.
+    fn by_player(&self) -> bool {
+        self.per_player && self.data.sides.iter().any(|s| s.teams.len() > 1)
     }
 
     /// The player picked out, while the view is by player. Checked against
     /// the data, which a host may replace under a selection.
     fn picked(&self) -> Option<usize> {
-        self.picked.filter(|p| self.per_player && *p < self.data.teams.len())
+        self.picked.filter(|p| self.by_player() && *p < self.data.teams.len())
+    }
+
+    /// The metrics that have a row, as indices into `data.metrics`: all of
+    /// them once the list is opened, else the first tier (with the second
+    /// where the first is thin), and always the one the large chart shows.
+    fn rows(&self) -> Vec<usize> {
+        self.rows_when(self.rows_open)
+    }
+
+    fn rows_when(&self, open: bool) -> Vec<usize> {
+        let metrics = &self.data.metrics;
+        if open {
+            return (0..metrics.len()).collect();
+        }
+        let first = metrics.iter().filter(|m| m.def.tier == 1).count();
+        let tier = if first < FEW_ROWS { 2 } else { 1 };
+        let chosen = self.hero();
+        (0..metrics.len()).filter(|m| metrics[*m].def.tier <= tier || *m == chosen).collect()
     }
 
     fn can_jump(&self) -> Option<f32> {
+        if self.free {
+            // Any moment may be ahead of a game that does not say where it is.
+            return self.cursor.filter(|c| *c >= MIN_JUMP_S && self.jump.is_none());
+        }
         self.cursor.filter(|c| *c > self.game_s + MIN_JUMP_S && self.jump.is_none() && self.game_s < self.data.duration_s)
     }
 
     fn marker_visible(&self, m: &Marker) -> bool {
-        !self.hide_future || m.t <= self.game_s
+        !self.hiding() || m.t <= self.game_s
+    }
+
+    /// How far the statistics are behind the game, when they are.
+    fn lag_s(&self) -> Option<f32> {
+        let lag = self.game_s - self.data.computed_s;
+        (self.has_data && !self.free && lag > 0.0).then_some(lag)
     }
 
     /// The moment a pointer at `t` on the axis means: `None` on the game line
     /// (close enough to it), else `t`, pulled onto a marker that is close.
     fn snap(&self, t: f32, end_s: f32, w: f32) -> Option<f32> {
         let px = |dt: f32| dt.abs() / end_s.max(1.0) * w;
-        if px(t - self.game_s) <= SNAP_PX {
+        if !self.free && px(t - self.game_s) <= SNAP_PX {
             return None;
         }
         let near = self
@@ -468,6 +753,19 @@ impl Timeline {
         self.cursor = self.snap(t, end_s, w);
     }
 
+    /// Does without a game position, or goes back to waiting for one.
+    fn set_free(&mut self, free: bool) {
+        self.free = free && self.silent_since.is_some();
+        if self.free {
+            // The cursor starts where the game was last seen.
+            self.cursor.get_or_insert(self.game_s);
+        } else {
+            self.cursor = None;
+        }
+        self.jump = None;
+        self.jump_asked = None;
+    }
+
     /// What the pointer points at: `key` is the element under it, `axis` the
     /// time axis in window px (its top is the top of the tracks). Nothing
     /// while a press is held, off the tracks, or under something that covers
@@ -482,7 +780,7 @@ impl Timeline {
             // A badge: the click goes to its marker, wherever on it the pointer is.
             Some(i) => {
                 let t = self.data.markers.get(i)?.t;
-                (Track::Events, (t != self.game_s).then_some(t))
+                (Track::Events, (self.free || t != self.game_s).then_some(t))
             }
             None => (Track::from_key(key)?, self.snap(axis::time_at(px, axis.x, axis.w, end_s), end_s, axis.w)),
         };
@@ -496,7 +794,8 @@ impl Timeline {
         // Escape at the window, or on one of ours; not one meant for another widget.
         // It closes the list of metrics first, if that is open.
         if event.kind == UiEventKind::Escape && (route.is_empty() || route.starts_with("tl:")) {
-            if !std::mem::take(&mut self.metric_open) {
+            // Without a game position there is no game to go back to following.
+            if !std::mem::take(&mut self.metric_open) && !self.free {
                 self.cursor = None;
             }
             return None;
@@ -507,10 +806,13 @@ impl Timeline {
             UiEventKind::PointerUp | UiEventKind::PointerCancel | UiEventKind::Click => self.pressed = false,
             _ => {}
         }
-        let metrics = self.data.metrics.len();
-        if select::apply_event(&mut self.hero, &mut self.metric_open, event, KEY_METRIC, |s| {
-            s.parse().ok().filter(|m| *m < metrics)
-        }) {
+        // Options and rows go by the metric's id: the list may have grown
+        // since the frame that was clicked on.
+        let known = |id: &str| self.data.metric_index(id).map(|m| Some(self.data.metrics[m].def.id));
+        let mut hero = self.hero;
+        let taken = select::apply_event(&mut hero, &mut self.metric_open, event, KEY_METRIC, known);
+        self.hero = hero;
+        if taken {
             return None;
         }
         let end_s = self.motion.borrow().horizon.map(|h| h.value).unwrap_or_else(|| self.horizon_s());
@@ -534,9 +836,11 @@ impl Timeline {
                 _ => {}
             }
         }
-        if let Some(m) = route.strip_prefix(KEY_ROW).and_then(|r| r.strip_prefix(':')).and_then(|r| r.parse::<usize>().ok()) {
-            if event.is_click_or_activate(&route) && m < self.data.metrics.len() {
-                self.hero = m;
+        if let Some(id) = route.strip_prefix(KEY_ROW).and_then(|r| r.strip_prefix(':')) {
+            if event.is_click_or_activate(&route) {
+                if let Some(m) = self.data.metric_index(id) {
+                    self.hero = Some(self.data.metrics[m].def.id);
+                }
             } else if event.kind == UiEventKind::KeyDown {
                 self.on_key(event, end_s);
             }
@@ -545,7 +849,7 @@ impl Timeline {
         if let Some(i) = route.strip_prefix(KEY_MARKER).and_then(|r| r.strip_prefix(':')).and_then(|r| r.parse::<usize>().ok()) {
             if event.is_click_or_activate(&route) {
                 if let Some(m) = self.data.markers.get(i) {
-                    self.cursor = (m.t != self.game_s).then_some(m.t);
+                    self.cursor = (self.free || m.t != self.game_s).then_some(m.t);
                 }
             }
             return None;
@@ -560,6 +864,12 @@ impl Timeline {
             self.cursor = None;
         } else if event.is_click_or_activate("tl:jump") {
             return self.ask_jump();
+        } else if event.is_click_or_activate(KEY_MORE) {
+            self.rows_open = !self.rows_open;
+        } else if event.is_click_or_activate(KEY_FREE) {
+            self.set_free(true);
+        } else if event.is_click_or_activate(KEY_UNFREE) {
+            self.set_free(false);
         }
         switch::apply_event(&mut self.hide_future, event, "tl:hide");
         collapsible::apply_event(&mut self.table_open, event, "tl:table");
@@ -577,6 +887,7 @@ impl Timeline {
             Some(NamedKey::ArrowLeft) => (here - step).max(0.0),
             Some(NamedKey::ArrowRight) => (here + step).min(end_s),
             Some(NamedKey::Home) => 0.0,
+            Some(NamedKey::End) if self.free => end_s,
             Some(NamedKey::End) => {
                 self.cursor = None;
                 return;
@@ -584,14 +895,14 @@ impl Timeline {
             _ => return,
         };
         // Stepping onto the game position goes back to following it.
-        let crossed = (here - self.game_s) * (target - self.game_s) <= 0.0 && self.cursor.is_some();
+        let crossed = (here - self.game_s) * (target - self.game_s) <= 0.0 && self.cursor.is_some() && !self.free;
         self.cursor = if crossed && (target - self.game_s).abs() < step { None } else { Some(target) };
     }
 
     fn frame(&self, cx: &BuildCx) -> Frame {
         let viewport_w = cx.viewport_width().unwrap_or(1180.0);
-        let narrow = viewport_w < 900.0;
-        let gutter = if narrow { 212.0 } else { 300.0 };
+        let narrow = viewport_w < NARROW_BELOW;
+        let gutter = if narrow { GUTTER_NARROW } else { GUTTER };
         let compact = cx.viewport_height().is_some_and(|h| h < COMPACT_BELOW);
         let w = cx.rect_of_key(KEY_LEAD).map(|r| r.w).unwrap_or(viewport_w - 2.0 * tokens::SPACE_4 - gutter - 12.0).max(120.0);
         let now = Instant::now();
@@ -614,38 +925,73 @@ impl Timeline {
 
     pub fn view(&self, cx: &BuildCx) -> El {
         let f = self.frame(cx);
-        let mut tracks = vec![self.ruler(&f), self.event_lanes(&f), self.lead_strip(&f)];
-        if !f.compact {
+        let mut tracks = vec![self.ruler(&f)];
+        let charts = self.charts(&f);
+        if self.has_data {
+            tracks.push(self.event_lanes(&f));
+            tracks.push(self.lead_strip(&f));
+        } else {
+            tracks.push(self.bare_strip(&f));
+        }
+        if charts {
             tracks.push(self.gap(&f, HERO_GAP_H, "gap", El::new(Kind::Custom("tl_gutter"))));
             tracks.push(self.hero_chart(&f));
             let label = column([text("Shown in the large chart:").caption().muted()])
                 .justify(Justify::End)
                 .padding(Sides { bottom: 3.0, ..Sides::zero() });
             tracks.push(self.gap(&f, LIST_HEAD_H, "list", label));
-            for m in 0..self.data.metrics.len() {
+            for m in self.rows() {
                 tracks.push(self.metric_row(&f, m));
+            }
+            if self.has_more() {
+                tracks.push(self.more_row(&f));
             }
         }
         let tracks_h = self.tracks_height(&f);
-        self.shown.set(Shown { hover: f.hover.is_some(), hero: !f.compact, tracks_h });
+        self.shown.set(Shown { hover: f.hover.is_some(), hero: charts, tracks_h });
         let grid = stack([column(tracks).width(Size::Fill(1.0)), self.overlay(&f, tracks_h)]).width(Size::Fill(1.0));
-        let mut parts = vec![self.header(&f), grid];
-        if !f.compact {
-            parts.push(self.table());
+        let mut parts = vec![self.header(&f)];
+        parts.extend(self.silence_notice());
+        parts.push(grid);
+        if charts {
+            parts.push(self.table(&f));
         }
         let root = column(parts).gap(tokens::SPACE_3).width(Size::Fill(1.0));
-        let moving = self.motion.borrow().moving || self.jump.is_some();
+        let moving = self.motion.borrow().moving;
+        // A silent game makes no event when its grace runs out: look again then.
+        let grace_left = self
+            .silent_since
+            .filter(|_| !self.reported && !self.free)
+            .and_then(|since| LOADING_GRACE.checked_sub(since.elapsed()))
+            .map(|left| left + Duration::from_millis(50));
         if moving {
             root.redraw_within(Duration::from_millis(16))
+        } else if self.jump.is_some() {
+            // The spinner and the sweep of a jump under way; nothing glides.
+            root.redraw_within(Duration::from_millis(50))
+        } else if let Some(left) = grace_left {
+            root.redraw_within(left)
         } else {
             root
         }
+    }
+
+    /// Whether the large chart and the rows are drawn: there are metrics to
+    /// draw (not a document's stand-in for none yet) and room for them.
+    fn charts(&self, f: &Frame) -> bool {
+        self.has_data && !self.data.placeholder && !f.compact
+    }
+
+    /// Whether the rows shown before the list is opened leave any out.
+    fn has_more(&self) -> bool {
+        self.rows_when(false).len() < self.data.metrics.len()
     }
 
     /// Where a track sits among the tracks: its top and its height, px.
     fn track_span(&self, track: Track) -> (f32, f32) {
         let lanes = self.lanes_height();
         let hero_top = RULER_H + lanes + LEAD_H + HERO_GAP_H;
+        let rows_top = hero_top + self.hero_height() + LIST_HEAD_H;
         match track {
             Track::Ruler => (0.0, RULER_H),
             Track::Events => (RULER_H, lanes),
@@ -653,16 +999,21 @@ impl Timeline {
             Track::Gap => (hero_top - HERO_GAP_H, HERO_GAP_H),
             Track::Hero => (hero_top, self.hero_height()),
             Track::ListHead => (hero_top + self.hero_height(), LIST_HEAD_H),
-            Track::Row(m) => (hero_top + self.hero_height() + LIST_HEAD_H + m as f32 * ROW_H, ROW_H),
+            Track::Row(m) => {
+                let place = self.rows().iter().position(|row| *row == m).unwrap_or(0);
+                (rows_top + place as f32 * ROW_H, ROW_H)
+            }
+            Track::More => (rows_top + self.rows().len() as f32 * ROW_H, MORE_H),
         }
     }
 
     fn tracks_height(&self, f: &Frame) -> f32 {
         let base = RULER_H + self.lanes_height() + LEAD_H;
-        if f.compact {
+        if !self.charts(f) {
             base
         } else {
-            base + HERO_GAP_H + self.hero_height() + LIST_HEAD_H + ROW_H * self.data.metrics.len() as f32
+            let more = if self.has_more() { MORE_H } else { 0.0 };
+            base + HERO_GAP_H + self.hero_height() + LIST_HEAD_H + ROW_H * self.rows().len() as f32 + more
         }
     }
 
@@ -670,16 +1021,43 @@ impl Timeline {
 
     fn header(&self, f: &Frame) -> El {
         let d = &self.data;
-        let over = self.game_s >= d.duration_s;
-        let mut clock_line = vec![text(clock(self.game_s)).heading().tabular_numerals()];
+        let over = !self.free && self.game_s >= d.duration_s;
+        let mut clock_line = if self.free {
+            vec![text("unknown").heading().muted()]
+        } else {
+            vec![text(clock(self.game_s)).heading().tabular_numerals()]
+        };
         if over {
             clock_line.push(badge("Game over").muted());
-        } else if !self.hide_future {
+        } else if !self.hiding() {
             clock_line.push(text(format!("of {}", clock(d.duration_s))).muted());
+        }
+        // Statistics that lag behind the game: the readouts are older than
+        // what is on screen in the game, and the viewer should know.
+        if let Some(lag) = self.lag_s().filter(|lag| *lag >= LAG_WORTH_SAYING_S) {
+            clock_line.push(if self.feed.stopped() {
+                badge(format!("No statistics after {}", clock(d.computed_s)))
+                    .muted()
+                    .key("tl:lag")
+                    .tooltip("The stats service stopped there. The game and the jump button carry on without them.")
+            } else {
+                badge(format!("Statistics {} behind", clock(lag)))
+                    .warning()
+                    .key("tl:lag")
+                    .tooltip("The stats service is still working this part of the game out. Readouts show the latest it has.")
+            });
         }
         let game = column([text("GAME").caption().muted(), row(clock_line).gap(tokens::SPACE_2).align(Align::Center)]).gap(2.0);
 
-        let (status, detail, follow): (El, String, bool) = if let Some(target) = self.jump {
+        let hint = if f.compact {
+            String::new()
+        } else if self.has_data {
+            "Click or drag the timeline to look back or ahead".into()
+        } else {
+            "Click the timeline to pick a moment, then jump everyone there".into()
+        };
+        let mut extra: Option<El> = None;
+        let (status, detail): (El, String) = if let Some(target) = self.jump {
             (
                 row([
                     spinner_with_color(cursor_color()).width(Size::Fixed(14.0)).height(Size::Fixed(14.0)),
@@ -688,12 +1066,27 @@ impl Timeline {
                 .gap(tokens::SPACE_2)
                 .align(Align::Center),
                 "The game runs ahead until it gets there".into(),
-                false,
+            )
+        } else if self.free {
+            extra = Some(
+                button("Wait for the game")
+                    .key(KEY_UNFREE)
+                    .secondary()
+                    .small()
+                    .tooltip("Hide what has not happened again and wait for the game to say where it is"),
+            );
+            let looking = match self.cursor {
+                Some(c) => format!("Looking at {}", clock(c)),
+                None => "No game position".into(),
+            };
+            (
+                row([status_dot(cursor_color()), text(looking).tabular_numerals()]).gap(tokens::SPACE_2).align(Align::Center),
+                "No game position: nothing is hidden".into(),
             )
         } else if let Some(c) = self.cursor {
             let delta = c - self.game_s;
             let detail = if delta >= 0.0 {
-                if self.revealed(c) {
+                if self.revealed(c) || !self.has_data {
                     format!("{} ahead of the game", clock(delta))
                 } else {
                     format!("{} ahead of the game · numbers hidden until it gets there", clock(delta))
@@ -701,21 +1094,26 @@ impl Timeline {
             } else {
                 format!("{} behind the game", clock(-delta))
             };
+            extra = Some(
+                row([button("Follow the game").key("tl:follow").secondary().small(), kbd("Esc")])
+                    .gap(tokens::SPACE_2)
+                    .align(Align::Center),
+            );
             (
                 row([status_dot(cursor_color()), text(format!("Looking at {}", clock(c))).tabular_numerals()])
                     .gap(tokens::SPACE_2)
                     .align(Align::Center),
                 detail,
-                true,
             )
         } else {
-            (
-                row([status_dot(game_color()), text(if over { "The game is over" } else { "Following the game" })])
-                    .gap(tokens::SPACE_2)
-                    .align(Align::Center),
-                if f.compact { String::new() } else { "Click or drag the timeline to look back or ahead".into() },
-                false,
-            )
+            let words = if over {
+                "The game is over"
+            } else if !self.reported {
+                "Waiting for the game to start"
+            } else {
+                "Following the game"
+            };
+            (row([status_dot(game_color()), text(words)]).gap(tokens::SPACE_2).align(Align::Center), hint)
         };
         let mut status_col = vec![status];
         if !detail.is_empty() {
@@ -725,26 +1123,71 @@ impl Timeline {
             game,
             column(status_col).gap(2.0).width(Size::Fill(1.0)).padding(Sides { left: tokens::SPACE_6, ..Sides::zero() }),
         ];
-        if follow {
-            items.push(
-                row([button("Follow the game").key("tl:follow").secondary().small(), kbd("Esc")])
+        items.extend(extra);
+        // The switches that change what is shown: beside the rest where there
+        // is room, on a line of their own in a narrow window.
+        let mut controls: Vec<El> = Vec::new();
+        if self.has_data && d.sides.iter().any(|s| s.teams.len() > 1) && !f.compact {
+            controls.push(toggle_group(
+                "tl:group",
+                &if self.by_player() { "players" } else { "sides" },
+                [("sides", "By side"), ("players", "By player")],
+            ));
+        }
+        // Once the game is over nothing is left to hide.
+        if !self.free && !over {
+            controls.push(
+                row([switch("tl:hide", self.hide_future).aria_label("Hide what has not happened yet"), text("Hide what has not happened yet")])
                     .gap(tokens::SPACE_2)
                     .align(Align::Center),
             );
         }
-        if d.sides.iter().any(|s| s.teams.len() > 1) && !f.compact {
-            items.push(toggle_group(
-                "tl:group",
-                &if self.per_player { "players" } else { "sides" },
-                [("sides", "By side"), ("players", "By player")],
-            ));
+        // One height whatever it holds, so the tracks below never shift.
+        if f.narrow && controls.len() > 1 {
+            let below = std::iter::once(spacer()).chain(controls);
+            column([
+                row(items).gap(tokens::SPACE_4).align(Align::Center).height(Size::Fixed(52.0)),
+                row(below).gap(tokens::SPACE_4).align(Align::Center).height(Size::Fixed(36.0)),
+            ])
+            .width(Size::Fill(1.0))
+        } else {
+            items.extend(controls);
+            row(items).gap(tokens::SPACE_4).align(Align::Center).height(Size::Fixed(52.0))
         }
-        items.push(
-            row([switch("tl:hide", self.hide_future), text("Hide what has not happened yet")])
-                .gap(tokens::SPACE_2)
-                .align(Align::Center),
-        );
-        row(items).gap(tokens::SPACE_4).align(Align::Center).height(Size::Fixed(48.0))
+    }
+
+    /// A line above the tracks once the game has been silent for a while:
+    /// what that means, and the way to use the timeline regardless. The
+    /// future is never shown on a timer: a slow start must not give the game away.
+    fn silence_notice(&self) -> Option<El> {
+        if self.free || !self.silence_shows() {
+            return None;
+        }
+        let (title, detail) = if self.reported {
+            ("The game has stopped saying where it is", "The game line stays where it was last seen.")
+        } else {
+            (
+                "The game is not saying where it is",
+                "It may still be loading. If it is running, user widgets are probably switched off in BAR's settings: the game line needs them.",
+            )
+        };
+        Some(
+            row([
+                icon("circle-alert").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND),
+                column([text(title).label(), text(detail).caption().muted().wrap_text()]).gap(2.0).width(Size::Fill(1.0)),
+                button("Use the timeline without it")
+                    .key(KEY_FREE)
+                    .secondary()
+                    .small()
+                    .tooltip("Shows the whole timeline with nothing hidden, and lets a jump go to any moment"),
+            ])
+            .gap(tokens::SPACE_3)
+            .align(Align::Center)
+            .padding(Sides::xy(tokens::SPACE_3, tokens::SPACE_2))
+            .fill(chosen_surface())
+            .stroke(tokens::BORDER)
+            .radius(tokens::RADIUS_MD),
+        )
     }
 
     // ---- tracks ----------------------------------------------------------
@@ -797,6 +1240,9 @@ impl Timeline {
     }
 
     fn lanes_height(&self) -> f32 {
+        if !self.has_data {
+            return 0.0;
+        }
         self.lanes() as f32 * LANE_H + 4.0
     }
 
@@ -819,7 +1265,7 @@ impl Timeline {
                 let top = lane as f32 * LANE_H + (LANE_H - BADGE) / 2.0 + 2.0;
                 items.push((
                     Place::Tag { at: frac(c.t, f.end_s), w: Some(BADGE + 4.0), h: BADGE + 2.0, top, anchor: Anchor::Center },
-                    self.badge(f, &c.members, c.t > self.game_s),
+                    self.badge(f, &c.members, !self.free && c.t > self.game_s),
                 ));
             }
             let (name, color) = if lanes == 1 {
@@ -884,9 +1330,11 @@ impl Timeline {
             kids.push(paint::class_sign(class, 11.0));
         }
         let extra = members.len() - 1;
+        // Room for "+9", or for "+99".
+        let count_w = if extra > 9 { 20.0 } else { 14.0 };
         if extra > 0 {
             kids.push(
-                text(format!("+{extra}"))
+                text(format!("+{}", extra.min(99)))
                     .font_size(9.0)
                     .line_height(11.0)
                     .center_text()
@@ -894,7 +1342,7 @@ impl Timeline {
                     .fill(Color::srgb_u8(39, 39, 42))
                     .stroke(Color::srgb_u8(9, 9, 11))
                     .radius(5.0)
-                    .width(Size::Fixed(if extra > 9 { 18.0 } else { 14.0 }))
+                    .width(Size::Fixed(count_w))
                     .height(Size::Fixed(11.0)),
             );
         }
@@ -904,8 +1352,8 @@ impl Timeline {
             .map(|i| {
                 let m = &d.markers[*i];
                 let mut s = format!("{}  {} — {}", clock(m.t), m.kind.label(), d.teams[m.team].name);
-                if let Some(u) = &m.unit {
-                    s.push_str(&format!(" ({u})"));
+                if let Some(unit) = m.unit_name(&self.unit_names) {
+                    s.push_str(&format!(" ({unit})"));
                 }
                 if let Some(note) = &m.note {
                     s.push_str(&format!("\n      {note}"));
@@ -934,7 +1382,7 @@ impl Timeline {
                     out.push(Rect::new(c.x + 2.0 + BADGE - 8.0, c.y + 1.0 + BADGE - 8.0, 11.0, 11.0));
                 }
                 if layout_extra {
-                    out.push(Rect::new(c.x + BADGE - 8.0, c.y - 3.0, 14.0, 11.0));
+                    out.push(Rect::new(c.x + BADGE + 6.0 - count_w, c.y - 3.0, count_w, 11.0));
                 }
                 out
             })
@@ -950,16 +1398,47 @@ impl Timeline {
             })
             .scale(if hot { 1.18 } else { 1.0 })
             .animate(Timing::SPRING_QUICK)
-            .aria_label(format!("{} at {}", lead.kind.label(), clock(lead.t)))
+            .aria_label(match lead.unit_name(&self.unit_names) {
+                Some(unit) => format!("{} ({unit}) at {}", lead.kind.label(), clock(lead.t)),
+                None => format!("{} at {}", lead.kind.label(), clock(lead.t)),
+            })
     }
 
     /// Where the samples go along the axis.
     fn x_of(&self, f: &Frame, i: usize) -> f32 {
-        i as f32 * self.data.period_s / f.end_s.max(1.0) * f.w
+        self.data.sample_t(i) / f.end_s.max(1.0) * f.w
     }
 
-    /// The lead strip: who is ahead, by each side's trailing share of metal
-    /// income, with fighting shown as light behind it.
+    /// The strip of a timeline without statistics: the axis to click on, and
+    /// in the gutter where the statistics stand.
+    fn bare_strip(&self, f: &Frame) -> El {
+        let (title, detail): (&str, &str) = match &self.feed {
+            Feed::Asking => ("Statistics", "Asking the server for them…"),
+            Feed::Queued => ("Statistics are queued", "The stats service has not started on this replay yet. They fill in here once it has."),
+            Feed::Building | Feed::Complete => ("Working out the numbers", "The first statistics are on their way."),
+            Feed::Unavailable(why) => ("No statistics", why),
+            Feed::Failed(why) => ("No statistics for this replay", why),
+        };
+        let gutter = column([text(title).label(), text(detail).caption().muted().wrap_text().max_lines(2)])
+            .gap(2.0)
+            .justify(Justify::Center)
+            .key("tl:feed")
+            .tooltip(format!("{title}: {detail}"));
+        let items = vec![(Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 }, quad(Color::srgb_u8(20, 20, 23)))];
+        let area = placed(Some(LEAD_H), 0.0, items)
+            .key(KEY_LEAD)
+            .focusable()
+            .focus_ring_inside()
+            .cursor(Cursor::Pointer)
+            .aria_label("Replay timeline: arrow keys move the cursor, Enter jumps everyone to it, Escape follows the game")
+            .radius(tokens::RADIUS_SM)
+            .clip();
+        self.track(f, LEAD_H, gutter, area)
+    }
+
+    /// The lead strip: who is ahead, by each side's share of the lead measure
+    /// (army value, or metal income where a source has no army value), with
+    /// fighting shown as light behind it.
     fn lead_strip(&self, f: &Frame) -> El {
         let d = &self.data;
         let h = LEAD_H;
@@ -971,17 +1450,17 @@ impl Timeline {
         for i in 1..shown {
             let (a, b) = (d.heat[i - 1], d.heat[i]);
             if a.max(b) > 0.02 {
-                let from = frac((i - 1) as f32 * d.period_s, f.end_s);
-                let to = frac(i as f32 * d.period_s, f.end_s);
+                let from = frac(d.sample_t(i - 1), f.end_s);
+                let to = frac(d.sample_t(i), f.end_s);
                 items.push((Place::Span { from, to, top: 0.0, bottom: 0.0 }, paint::heat(ember, a, b, 4.0)));
             }
         }
         let mut paths = Vec::new();
         let x = |i: usize| self.x_of(f, i);
         if shown >= 2 && d.sides.len() == 2 {
-            // A lead of 25 points of share (62.5% against 37.5%) reaches the edge.
             // The scale is fixed so that it cannot hint at how lopsided it gets.
-            let lead = |i: usize| ((d.shares[0][i] - 0.5) / 0.125).clamp(-1.0, 1.0) * (mid - 4.0);
+            let full = d.lead.full_at();
+            let lead = |i: usize| ((d.shares[0][i] - 0.5) / full).clamp(-1.0, 1.0) * (mid - 4.0);
             for (side, sign) in [(0usize, 1.0f32), (1, -1.0)] {
                 let pts: Vec<(f32, f32)> = (0..shown).map(|i| (x(i), mid - (lead(i) * sign).max(0.0) * sign)).collect();
                 let color = d.sides[side].color;
@@ -1057,11 +1536,11 @@ impl Timeline {
         let at = self.readout_s();
         let mut lines = vec![row([
             text("Who is ahead").label(),
-            text("metal income, 75 s").caption().muted().ellipsis().width(Size::Fill(1.0)),
+            text(d.lead.label()).caption().muted().ellipsis().width(Size::Fill(1.0)),
         ])
         .gap(tokens::SPACE_2)
         .align(Align::Center)];
-        if self.game_s < d.period_s {
+        if !self.started() {
             lines.push(text("Waiting for the first numbers").caption().muted());
         } else if let Some(why) = self.hidden_reason(at) {
             lines.push(text(why).caption().muted());
@@ -1089,7 +1568,7 @@ impl Timeline {
     /// Series the large chart draws: per side, or per player.
     fn hero_series(&self) -> Vec<(Option<usize>, String, Color, Vec<f32>)> {
         let d = &self.data;
-        if self.per_player {
+        if self.by_player() {
             d.teams
                 .iter()
                 .enumerate()
@@ -1106,8 +1585,8 @@ impl Timeline {
 
     fn hero_height(&self) -> f32 {
         // Room for the ranked list: seven players and a line of advice.
-        if self.per_player {
-            HERO_H + 60.0
+        if self.by_player() {
+            HERO_H + 88.0
         } else {
             HERO_H
         }
@@ -1116,9 +1595,12 @@ impl Timeline {
     /// The scale a chart uses, glided toward the top of what it may draw, and
     /// the round value it is gliding to.
     fn eased_top(&self, f: &Frame, metric: usize, hero: bool, peak: f32) -> (f32, f32) {
-        let target = nice_ceil(peak * 1.04);
+        let def = self.data.metrics[metric].def;
+        let target = def.scale_top(peak);
         let mut motion = self.motion.borrow_mut();
-        let e = motion.tops.entry((metric, hero)).or_insert(Eased::new(target));
+        // By the metric's id: the scale stays with its metric when new data
+        // brings more metrics and the indices move.
+        let e = motion.tops.entry((def.id, hero)).or_insert(Eased::new(target));
         let moving = e.follow(target, f.now);
         let v = e.value;
         motion.moving |= moving;
@@ -1153,7 +1635,7 @@ impl Timeline {
             if level > 0.0 && shown >= 2 {
                 items.push((
                     Place::Tag { at: 0.0, w: None, h: 16.0, top: gy - 16.0, anchor: Anchor::After },
-                    text(number(value)).caption().muted().tabular_numerals().padding(Sides { left: 2.0, ..Sides::zero() }),
+                    text(def.show(value)).caption().muted().tabular_numerals().padding(Sides { left: 2.0, ..Sides::zero() }),
                 ));
             }
         }
@@ -1196,7 +1678,7 @@ impl Timeline {
         items.insert(0, (Place::Span { from: 0.0, to: 1.0, top: 0.0, bottom: 0.0 }, vector(asset)));
         self.cursor_readout(f, &series, top, &y, &mut items, h);
         if let Some(i) = self.hover_sample(f, Track::Hero) {
-            let at = frac(i as f32 * d.period_s, f.end_s);
+            let at = frac(d.sample_t(i), f.end_s);
             items.extend(series.iter().map(|s| hover_ring(at, y(s.3[i]), s.2, 4.5)));
         }
         let area = placed(Some(h), 0.0, items).key(Self::area_key("hero")).cursor(Cursor::Pointer).clip();
@@ -1225,7 +1707,7 @@ impl Timeline {
     ) {
         let d = &self.data;
         let at = self.readout_s();
-        if !self.revealed(at) || self.game_s < d.period_s {
+        if !self.revealed(at) || !self.started() {
             return;
         }
         let i = d.sample_index(at);
@@ -1246,9 +1728,11 @@ impl Timeline {
             label_y[k] = label_y[k].max(label_y[k - 1] + 18.0);
         }
         let overflow = label_y.last().map(|l| l + 18.0 - h).unwrap_or(0.0).max(0.0);
-        let at_f = frac(i as f32 * d.period_s, f.end_s);
+        let at_f = frac(d.sample_t(i), f.end_s);
         // Chips go on the side away from the fog (or from the window edge).
-        let left = frac(at, f.end_s) > 0.78 || (self.hide_future && at >= self.game_s - 1.0);
+        let left = frac(at, f.end_s) > 0.78
+            || (self.hiding() && at >= self.game_s - 1.0)
+            || (self.lag_s().is_some() && at >= d.computed_s - 1.0);
         for (k, (py, color, value)) in marks.into_iter().enumerate() {
             items.push((
                 Place::Tag { at: at_f, w: Some(9.0), h: 9.0, top: py - 4.5, anchor: Anchor::Center },
@@ -1276,24 +1760,28 @@ impl Timeline {
     fn hero_gutter(&self, def: MetricDef, series: &[(Option<usize>, String, Color, Vec<f32>)]) -> El {
         let d = &self.data;
         let at = self.readout_s();
-        let visible = self.revealed(at) && self.game_s >= d.period_s;
+        let visible = self.revealed(at) && self.started();
         let i = d.sample_index(at);
-        let when = if self.cursor.is_none() && self.game_s > d.computed_s {
-            format!("At {} · the latest worked out so far", clock(at))
+        let reading = def.reading();
+        let at_words = if reading.is_empty() { format!("At {}", clock(at)) } else { format!("{reading}, at {}", clock(at)) };
+        let when = if self.cursor.is_none() && self.lag_s().is_some() {
+            format!("{at_words} · the latest worked out")
         } else {
-            format!("At {}", clock(at))
+            at_words
         };
         // The title is the control: it names what the chart shows and opens
         // the list that changes it.
-        let title = select::select_trigger(KEY_METRIC, def.about)
-            .aria_expanded(self.metric_open)
-            .tooltip("What the large chart shows. Click to choose another.");
+        let title = select::select_trigger(KEY_METRIC, def.label).aria_expanded(self.metric_open).tooltip(if def.note.is_empty() {
+            format!("The large chart shows: {}. Click to choose another.", def.about)
+        } else {
+            format!("The large chart shows: {}. {} Click to choose another.", def.about, def.note)
+        });
         let mut lines = vec![title, text(when).caption().muted().tabular_numerals().wrap_text()];
         if !visible {
             lines.push(text(self.hidden_reason(at).unwrap_or("Waiting for the first numbers")).muted().wrap_text());
             return column(lines).gap(tokens::SPACE_1);
         }
-        if self.per_player {
+        if self.by_player() {
             // A ranked list at the cursor; a click picks a player out.
             let mut ranked: Vec<&(Option<usize>, String, Color, Vec<f32>)> = series.iter().collect();
             ranked.sort_by(|a, b| b.3[i].total_cmp(&a.3[i]));
@@ -1319,7 +1807,7 @@ impl Timeline {
                 ])
                 .gap(tokens::SPACE_2)
                 .align(Align::Center)
-                .height(Size::Fixed(20.0))
+                .height(Size::Fixed(24.0))
                 .padding(Sides::xy(4.0, 0.0))
                 .radius(3.0)
                 .key(format!("{KEY_PLAYER}:{team}"))
@@ -1358,7 +1846,7 @@ impl Timeline {
             }
             if series.len() >= 2 {
                 let vals: Vec<(Color, f32)> = series.iter().map(|s| (s.2, s.3[i])).collect();
-                lines.push(share_bar(&vals, 8.0).padding(Sides { top: tokens::SPACE_1, ..Sides::zero() }));
+                lines.push(column([share_bar(&vals, 8.0)]).padding(Sides { top: tokens::SPACE_1, ..Sides::zero() }));
             }
         }
         column(lines).gap(tokens::SPACE_1)
@@ -1369,6 +1857,32 @@ impl Timeline {
     fn gap(&self, f: &Frame, h: f32, id: &str, gutter: El) -> El {
         let area = placed(Some(h), 0.0, Vec::new()).key(Self::area_key(id)).cursor(Cursor::Pointer);
         self.track(f, h, gutter, area)
+    }
+
+    /// The line under the rows: opens the list in full, or closes it again.
+    /// On the axis like the rest, so a click beside it still places the cursor.
+    fn more_row(&self, f: &Frame) -> El {
+        let total = self.data.metrics.len();
+        let (glyph, words) = if self.rows_open {
+            ("chevron-up", "Show the main statistics only".to_owned())
+        } else {
+            ("chevron-down", format!("Show all {total} statistics"))
+        };
+        let hot = f.is_hovered(KEY_MORE);
+        let tone = if hot { tokens::FOREGROUND } else { tokens::MUTED_FOREGROUND };
+        let gutter = row([icon(glyph).icon_size(tokens::ICON_SM).text_color(tone), text(words).caption().text_color(tone).ellipsis()])
+            .gap(tokens::SPACE_2)
+            .align(Align::Center)
+            .key(KEY_MORE)
+            .focusable()
+            .focus_ring_inside()
+            .role(Role::Button)
+            .aria_expanded(self.rows_open)
+            .cursor(Cursor::Pointer)
+            .radius(tokens::RADIUS_SM);
+        let gutter = if hot { gutter.fill(chosen_surface()) } else { gutter };
+        let area = placed(Some(MORE_H), 0.0, Vec::new()).key(Self::area_key("more")).cursor(Cursor::Pointer);
+        self.track_inset(f, MORE_H, Sides { left: tokens::SPACE_2, ..Sides::zero() }, gutter, area)
     }
 
     /// A compact row: a mark that says whether the large chart shows this
@@ -1412,10 +1926,10 @@ impl Timeline {
             vector(VectorAsset::from_paths([0.0, 0.0, f.w, h], paths)),
         ));
         let at = self.readout_s();
-        let visible = self.revealed(at) && self.game_s >= d.period_s;
+        let visible = self.revealed(at) && self.started();
         let i = d.sample_index(at);
         if visible {
-            let at_f = frac(i as f32 * d.period_s, f.end_s);
+            let at_f = frac(d.sample_t(i), f.end_s);
             for (color, v) in &lines {
                 items.push((
                     Place::Tag { at: at_f, w: Some(7.0), h: 7.0, top: y(v[i]) - 3.5, anchor: Anchor::Center },
@@ -1424,13 +1938,13 @@ impl Timeline {
             }
         }
         if let Some(i) = self.hover_sample(f, Track::Row(m)) {
-            let at = frac(i as f32 * d.period_s, f.end_s);
+            let at = frac(d.sample_t(i), f.end_s);
             items.extend(lines.iter().map(|(color, v)| hover_ring(at, y(v[i]), *color, 3.5)));
         }
         let area = placed(Some(h), 0.0, items).key(Self::area_key(&format!("row{m}"))).cursor(Cursor::Pointer).clip();
 
         let selected = m == self.hero();
-        let key = format!("{KEY_ROW}:{m}");
+        let key = format!("{KEY_ROW}:{}", def.id);
         let hot = f.is_hovered(&key);
         let mut cells = vec![
             choice_mark(selected, hot),
@@ -1445,7 +1959,7 @@ impl Timeline {
                 let value = text(if visible { def.show(v) } else { "–".into() })
                     .tabular_numerals()
                     .end_text()
-                    .width(Size::Fixed(if f.narrow { 40.0 } else { 46.0 }));
+                    .width(Size::Fixed(if f.narrow { ROW_VALUE_NARROW_W } else { ROW_VALUE_W }));
                 cells.push(if visible { value } else { value.muted() });
                 let standing = match (visible, f.narrow) {
                     (false, _) => String::new(),
@@ -1454,9 +1968,9 @@ impl Timeline {
                 };
                 // As wide as the bar and second number it stands in for.
                 cells.push(text(standing).caption().muted().tabular_numerals().width(Size::Fixed(if f.narrow {
-                    40.0
+                    ROW_VALUE_NARROW_W
                 } else {
-                    124.0
+                    ROW_BAR_W + tokens::SPACE_2 + ROW_VALUE_W
                 })));
             }
             None => {
@@ -1474,10 +1988,11 @@ impl Timeline {
             .cursor(Cursor::Pointer)
             .role(Role::Radio)
             .aria_checked(selected)
-            .tooltip(if selected {
-                format!("{}{whose}: this is what the large chart shows", def.about)
-            } else {
-                format!("{}{whose}: click to show it in the large chart", def.about)
+            .tooltip(match (selected, def.note.is_empty()) {
+                (true, true) => format!("{}{whose}: this is what the large chart shows", def.about),
+                (true, false) => format!("{}{whose}: this is what the large chart shows. {}", def.about, def.note),
+                (false, true) => format!("{}{whose}: click to show it in the large chart", def.about),
+                (false, false) => format!("{}{whose}: click to show it in the large chart. {}", def.about, def.note),
             })
             .radius(tokens::RADIUS_SM);
         // The chosen row is lit across its whole width; one under the pointer
@@ -1499,8 +2014,13 @@ impl Timeline {
         let g = frac(self.game_s, f.end_s);
         let mut items: Vec<(Place, El)> = Vec::new();
         let fog_top = RULER_H;
-        if g < 1.0 {
-            if self.hide_future {
+        // Words on a band sit level with the strip, where nothing else is written.
+        let words_top = fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0;
+        let words = |from: f32, to: f32, what: &'static str| {
+            (Place::Tag { at: (from + to) / 2.0, w: None, h: 16.0, top: words_top, anchor: Anchor::Center }, text(what).caption().muted())
+        };
+        if g < 1.0 && !self.free {
+            if self.hiding() {
                 items.push((
                     Place::Span { from: g, to: 1.0, top: fog_top, bottom: 0.0 },
                     paint::fog(Color::srgb_u8(30, 30, 34).with_alpha(0.94), 22.0),
@@ -1510,16 +2030,7 @@ impl Timeline {
                 let middle = (g + 1.0) / 2.0 * f.w;
                 let struck = self.cursor.is_some_and(|c| (frac(c, f.end_s) * f.w - middle).abs() < 52.0);
                 if fog_w > 140.0 && self.jump.is_none() && !struck {
-                    items.push((
-                        Place::Tag {
-                            at: (g + 1.0) / 2.0,
-                            w: None,
-                            h: 16.0,
-                            top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0,
-                            anchor: Anchor::Center,
-                        },
-                        text("Not played yet").caption().muted(),
-                    ));
+                    items.push(words(g, 1.0, "Not played yet"));
                 }
             } else {
                 items.push((
@@ -1528,26 +2039,34 @@ impl Timeline {
                 ));
             }
         }
-        // Statistics still being worked out between what is done and the game.
-        if d.computed_s < self.game_s {
-            let from = frac(d.computed_s, f.end_s);
-            items.push((Place::Span { from, to: g, top: fog_top, bottom: 0.0 }, skeleton().radius(0.0)));
-            if (g - from) * f.w > 120.0 {
+        // Statistics that end short of what is on show: between what is
+        // worked out and the game, and, with the future shown, on to the end.
+        let reach = if self.hiding() { g } else { 1.0 };
+        let from = frac(d.computed_s, f.end_s);
+        if self.has_data && d.computed_s < d.duration_s && from < reach {
+            let stopped = self.feed.stopped();
+            // Up to the game the viewer is waiting for these: that part moves.
+            // Past it, and where no more will come, the band stands still.
+            let waiting_to = if self.free || stopped { from } else { g.clamp(from, reach) };
+            if waiting_to > from {
+                items.push((Place::Span { from, to: waiting_to, top: fog_top, bottom: 0.0 }, skeleton().radius(0.0)));
+            }
+            if reach > waiting_to {
                 items.push((
-                    Place::Tag {
-                        at: (from + g) / 2.0,
-                        w: None,
-                        h: 16.0,
-                        top: fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0,
-                        anchor: Anchor::Center,
-                    },
-                    text("Working out the numbers…").caption().muted(),
+                    Place::Span { from: waiting_to, to: reach, top: fog_top, bottom: 0.0 },
+                    quad(Color::srgb_u8(39, 39, 42).with_alpha(0.55)),
                 ));
+            }
+            let say = if stopped { "No statistics from here on" } else { "Working out the numbers…" };
+            let (a, b) = if waiting_to > from { (from, waiting_to) } else { (from, reach) };
+            if (b - a) * f.w > if stopped { 170.0 } else { 150.0 } {
+                items.push(words(a, b, say));
             }
         }
         if let Some(target) = self.jump {
             let to = frac(target, f.end_s);
-            items.push((Place::Span { from: g, to, top: fog_top, bottom: 0.0 }, paint::sweep(cursor_color().with_alpha(0.035))));
+            let from = if self.free { 0.0 } else { g };
+            items.push((Place::Span { from, to, top: fog_top, bottom: 0.0 }, paint::sweep(cursor_color().with_alpha(0.035))));
             items.push((
                 Place::Line { at: to, w: 9.0, top: RULER_H - 4.0, bottom: 0.0 },
                 paint::glow_line(cursor_color(), 1.5, 3.0, 0.25, 4.0),
@@ -1561,11 +2080,13 @@ impl Timeline {
                 quad(tokens::FOREGROUND.with_alpha(0.42)),
             ));
         }
-        items.push((
-            Place::Line { at: g, w: 16.0, top: RULER_H - 4.0, bottom: 0.0 },
-            paint::glow_line(game_color(), 2.0, 4.0, 0.12, 0.0),
-        ));
-        if let Some(c) = self.cursor.filter(|c| Some(*c) != self.jump) {
+        if !self.free {
+            items.push((
+                Place::Line { at: g, w: 16.0, top: RULER_H - 4.0, bottom: 0.0 },
+                paint::glow_line(game_color(), 2.0, 4.0, 0.12, 0.0),
+            ));
+        }
+        if let Some(c) = self.cursor.filter(|c| !self.jumping_near(*c)) {
             items.push((
                 Place::Line { at: frac(c, f.end_s), w: 12.0, top: RULER_H - 4.0, bottom: 0.0 },
                 paint::glow_line(cursor_color(), 2.0, 3.0, 0.12, 0.0),
@@ -1625,9 +2146,9 @@ impl Timeline {
             picked,
         };
         let (title, mut lines): (&str, Vec<ReadoutLine>) = match hv.track {
-            Track::Ruler | Track::Events | Track::Gap | Track::ListHead => return None,
+            Track::Ruler | Track::Events | Track::Gap | Track::ListHead | Track::More => return None,
             Track::Lead => (
-                "Share of metal income",
+                d.lead.title(),
                 d.sides
                     .iter()
                     .enumerate()
@@ -1727,12 +2248,15 @@ impl Timeline {
         };
         // About how wide a time chip draws: "25:00", or "1:02:05" past the hour.
         let chip_w = |t: f32| if t >= 3600.0 { 66.0 } else { 50.0 };
-        let mut out = vec![Chip { at: g, anchor: game_anchor, width: chip_w(self.game_s), what: ChipKind::Game }];
+        let mut out = Vec::new();
+        if !self.free {
+            out.push(Chip { at: g, anchor: game_anchor, width: chip_w(self.game_s), what: ChipKind::Game });
+        }
         if let Some(target) = self.jump {
             out.push(Chip { at: frac(target, f.end_s), anchor: Anchor::After, width: 128.0, what: ChipKind::Jumping(target) });
         }
         // While a jump is under way the cursor may still look elsewhere.
-        if let Some(c) = self.cursor.filter(|c| Some(*c) != self.jump) {
+        if let Some(c) = self.cursor.filter(|c| !self.jumping_near(*c)) {
             let at = frac(c, f.end_s);
             if self.can_jump().is_some() {
                 out.push(Chip { at, anchor: Anchor::After, width: 176.0, what: ChipKind::Jump(c) });
@@ -1819,14 +2343,19 @@ impl Timeline {
 
     // ---- the numbers as a table ----------------------------------------------
 
-    fn table(&self) -> El {
+    fn table(&self, f: &Frame) -> El {
         let d = &self.data;
         let at = self.readout_s();
-        let visible = self.revealed(at) && self.game_s >= d.period_s;
+        let visible = self.revealed(at) && self.started();
         let i = d.sample_index(at);
-        let cell_w = Size::Fixed(76.0);
+        const CELL_W: f32 = 88.0;
+        let cell_w = Size::Fixed(CELL_W);
+        // A column per main statistic, as many as leave room for the names:
+        // the full list would not fit a window.
+        let room = (((f.gutter + f.w) - 170.0) / CELL_W).floor().max(1.0) as usize;
+        let columns: Vec<usize> = self.rows_when(false).into_iter().take(room).collect();
         let mut header: Vec<El> = vec![text("").width(Size::Fill(1.0))];
-        header.extend(d.metrics.iter().map(|m| text(m.def.label).caption().muted().end_text().width(cell_w)));
+        header.extend(columns.iter().map(|m| text(d.metrics[*m].def.label).caption().muted().end_text().ellipsis().width(cell_w)));
         let mut rows = vec![row(header).align(Align::Center)];
         if !visible {
             rows.push(text(self.hidden_reason(at).unwrap_or("No numbers here")).muted());
@@ -1839,10 +2368,7 @@ impl Timeline {
                     .padding(Sides { left: indent, ..Sides::zero() })
                     .width(Size::Fill(1.0))];
                 cells.extend(
-                    d.metrics
-                        .iter()
-                        .enumerate()
-                        .map(|(m, s)| text(s.def.show(value(m))).tabular_numerals().end_text().width(cell_w)),
+                    columns.iter().map(|m| text(d.metrics[*m].def.show(value(*m))).tabular_numerals().end_text().width(cell_w)),
                 );
                 row(cells).align(Align::Center)
             };
@@ -1861,7 +2387,7 @@ impl Timeline {
                 }
             }
         }
-        collapsible("tl:table", format!("All numbers at {}", clock(at)), self.table_open, [column(rows).gap(tokens::SPACE_1)])
+        collapsible("tl:table", format!("The main numbers at {}", clock(at)), self.table_open, [column(rows).gap(tokens::SPACE_1)])
     }
 }
 
@@ -1898,7 +2424,15 @@ fn choice_mark(selected: bool, hot: bool) -> El {
         (false, true) => (tokens::FOREGROUND.with_alpha(0.85), tokens::FOREGROUND.with_alpha(0.4)),
         (false, false) => (tokens::MUTED_FOREGROUND.with_alpha(0.6), Color::srgb_u8a(0, 0, 0, 0)),
     };
-    stack([El::new(Kind::Custom("tl_choice_dot")).fill(dot).width(Size::Fixed(6.0)).height(Size::Fixed(6.0)).radius(3.0)])
+    // The lint takes each of the ring's corners for a square: a dot in its
+    // middle is reported as painting into them, which a round dot cannot.
+    let dot = El::new(Kind::Custom("tl_choice_dot"))
+        .fill(dot)
+        .width(Size::Fixed(6.0))
+        .height(Size::Fixed(6.0))
+        .radius(3.0)
+        .allow_lint(FindingKind::CornerStackup);
+    stack([dot])
         .align(Align::Center)
         .justify(Justify::Center)
         .stroke(ring)
@@ -1926,7 +2460,7 @@ fn share_bar(vals: &[(Color, f32)], h: f32) -> El {
 /// value when there are more than two sides).
 fn tug(def: MetricDef, vals: &[(Color, f32)], visible: bool, with_bar: bool) -> Vec<El> {
     // Without the bar the gutter is the narrow one: the numbers close up too.
-    let value_w = if with_bar { 46.0 } else { 40.0 };
+    let value_w = if with_bar { ROW_VALUE_W } else { ROW_VALUE_NARROW_W };
     let value = |v: f32, end: bool| {
         let t = text(if visible { def.show(v) } else { "–".into() }).tabular_numerals().width(Size::Fixed(value_w));
         let t = if end { t.end_text() } else { t };
@@ -1937,7 +2471,7 @@ fn tug(def: MetricDef, vals: &[(Color, f32)], visible: bool, with_bar: bool) -> 
         }
     };
     let bar = |vals: &[(Color, f32)]| {
-        if visible { share_bar(vals, 6.0) } else { share_bar(&[], 6.0) }.width(Size::Fixed(if with_bar { 70.0 } else { 0.0 }))
+        if visible { share_bar(vals, 6.0) } else { share_bar(&[], 6.0) }.width(Size::Fixed(if with_bar { ROW_BAR_W } else { 0.0 }))
     };
     match vals {
         [a, b] => {
@@ -2044,6 +2578,31 @@ mod tests {
         assert_eq!(t.ask_jump(), Some(Action::Jump(900.0)));
         t.set_game(898.5);
         assert_eq!(t.jump, None);
+    }
+
+    #[test]
+    fn the_server_naming_our_own_jump_in_whole_seconds_changes_nothing() {
+        let mut t = timeline();
+        t.cursor = Some(899.6);
+        assert_eq!(t.ask_jump(), Some(Action::Jump(899.6)));
+        t.show_jump(900.0);
+        assert_eq!(t.jump, Some(899.6));
+        let f = Frame {
+            end_s: 1200.0,
+            w: 1200.0,
+            gutter: 300.0,
+            compact: false,
+            narrow: false,
+            now: Instant::now(),
+            hover: None,
+            hovered: None,
+        };
+        // One chip at the target, not the cursor's as well.
+        let kinds: Vec<_> = t.chips(&f).iter().map(|c| std::mem::discriminant(&c.what)).collect();
+        assert_eq!(kinds, [std::mem::discriminant(&ChipKind::Game), std::mem::discriminant(&ChipKind::Jumping(0.0))]);
+        // Another viewer's jump elsewhere is a new one.
+        t.show_jump(1100.0);
+        assert_eq!(t.jump, Some(1100.0));
     }
 
     #[test]
@@ -2245,7 +2804,7 @@ mod tests {
     fn the_title_menu_and_the_rows_choose_the_large_chart() {
         let mut t = timeline();
         let cx = EventCx::new();
-        assert_eq!(t.hero, 0);
+        assert_eq!(t.hero, Some("metalIncome"));
         assert!(t.layers().is_empty());
         // The title opens the list (once the large chart has been drawn).
         t.shown.set(Shown { hover: false, hero: true, tracks_h: 600.0 });
@@ -2253,15 +2812,17 @@ mod tests {
         assert!(t.metric_open);
         assert_eq!(t.layers().len(), 1);
         // A choice from it closes it.
-        t.on_event(&UiEvent::synthetic_click("tl:metric:option:4"), &cx);
-        assert_eq!((t.hero, t.metric_open), (4, false));
+        t.on_event(&UiEvent::synthetic_click("tl:metric:option:unitsKilled"), &cx);
+        assert_eq!((t.hero, t.metric_open), (Some("unitsKilled"), false));
+        assert_eq!(t.hero(), 4);
         // A row does the same without the list.
-        t.on_event(&UiEvent::synthetic_click("tl:row:2"), &cx);
-        assert_eq!(t.hero, 2);
+        t.on_event(&UiEvent::synthetic_click("tl:row:metalExpense"), &cx);
+        assert_eq!(t.hero, Some("metalExpense"));
         // A choice that does not exist is ignored.
         t.on_event(&UiEvent::synthetic_click(KEY_METRIC), &cx);
-        t.on_event(&UiEvent::synthetic_click("tl:metric:option:99"), &cx);
-        assert_eq!(t.hero, 2);
+        t.on_event(&UiEvent::synthetic_click("tl:metric:option:moonPhase"), &cx);
+        t.on_event(&UiEvent::synthetic_click("tl:row:moonPhase"), &cx);
+        assert_eq!(t.hero, Some("metalExpense"));
         // A click beside the open list closes it.
         t.on_event(&UiEvent::synthetic_click("tl:metric:dismiss"), &cx);
         assert!(!t.metric_open);
@@ -2278,7 +2839,7 @@ mod tests {
     fn a_selection_survives_data_with_less_in_it() {
         let mut t = teams_of(16);
         t.per_player = true;
-        t.hero = 8;
+        t.hero = Some("metalExcess");
         t.picked = Some(17);
         assert_eq!((t.hero(), t.picked()), (8, Some(17)));
         // A host replaces the data: two players, one metric.
@@ -2289,6 +2850,70 @@ mod tests {
         let cx = BuildCx::new(&theme).with_viewport(1180.0, 900.0);
         t.forced_hover = Some(Hover { t: 300.0, on_game: false, track: Track::Hero, y: 300.0 });
         let _ = t.view(&cx);
+    }
+
+    /// What the viewer set up stays while a server's statistics grow, poll
+    /// after poll: from nothing yet, through a stats service's own tally, to
+    /// the whole game.
+    #[test]
+    fn what_the_viewer_set_up_survives_growing_statistics() {
+        use crate::fixtures::docs;
+        let theme = Theme::default();
+        let cx = BuildCx::new(&theme).with_viewport(1180.0, 900.0);
+        let full = docs::teams();
+        let replay_s = 1200;
+        let stats = |doc: &barwatch_core::timeline::TimelineDoc| Some(doc::data_from_doc(doc, replay_s));
+        let mut t = Timeline::waiting(replay_s as f32);
+        t.set_game(300.0);
+        // Teams and no metric yet: the large chart settles on nothing.
+        let mut bare = docs::prefix(&full, 200);
+        bare.metrics.clear();
+        bare.series.clear();
+        t.set_statistics(Feed::Building, stats(&bare));
+        assert_eq!(t.hero, None);
+        let _ = t.view(&cx);
+        // A stats service's own tally, part-way: army value, the best it has.
+        t.set_statistics(Feed::Building, stats(&docs::older_service(&docs::prefix(&full, 9_000))));
+        assert_eq!(t.hero, Some("valueArmy"));
+        // The viewer looks back, by player, and picks one out.
+        let ev = EventCx::new();
+        t.on_event(&UiEvent::synthetic_click("tl:group:toggle:players"), &ev);
+        t.on_event(&UiEvent::synthetic_click("tl:player:5"), &ev);
+        t.on_event(&UiEvent::synthetic_click(KEY_MORE), &ev);
+        t.cursor = Some(200.0);
+        assert!(t.by_player() && t.rows_open);
+        assert_eq!(t.picked(), Some(5));
+        let top = |t: &Timeline| t.motion.borrow().tops.get(&("valueArmy", true)).map(|e| e.value);
+        let _ = t.view(&cx);
+        let before = top(&t);
+        assert!(before.is_some());
+        // The next poll has more of the game, all of it past the game position:
+        // nothing on screen moves.
+        t.set_statistics(Feed::Building, stats(&docs::older_service(&docs::prefix(&full, 12_000))));
+        let _ = t.view(&cx);
+        assert_eq!(top(&t), before, "the scale stays put");
+        // The whole game, with every counter: more metrics, all of it kept.
+        t.set_statistics(Feed::Complete, stats(&full));
+        assert!(t.data.metric_index("metalIncome").is_some());
+        assert_eq!((t.hero, t.cursor, t.picked(), t.rows_open), (Some("valueArmy"), Some(200.0), Some(5), true));
+        let _ = t.view(&cx);
+        assert_eq!(top(&t), before, "the same metric, the same moments: the same scale");
+        // Statistics of a game with no side of several players: nothing to
+        // tell apart, so neither the view by player nor its toggle shows.
+        t.set_statistics(Feed::Complete, stats(&docs::duel()));
+        assert!(!t.by_player());
+        let has_key = |el: &El, key: &str| {
+            fn walk(el: &El, key: &str) -> bool {
+                el.key.as_deref() == Some(key) || el.children.iter().any(|c| walk(c, key))
+            }
+            walk(el, key)
+        };
+        let view = t.view(&cx);
+        assert!(!has_key(&view, "tl:group:toggle:players"));
+        // Back to one that has: the viewer's choice is still there.
+        t.set_statistics(Feed::Complete, stats(&full));
+        assert!(t.by_player());
+        assert!(has_key(&t.view(&cx), "tl:group:toggle:players"));
     }
 
     #[test]
@@ -2333,11 +2958,19 @@ mod tests {
             hover: None,
             hovered: None,
         };
-        for per_player in [false, true] {
+        for (per_player, rows_open) in [(false, false), (true, false), (false, true), (true, true)] {
             t.per_player = per_player;
-            let last = t.data.metrics.len() - 1;
+            t.rows_open = rows_open;
+            let what = format!("per player: {per_player}, every row: {rows_open}");
+            // Nine metrics, five of them in the short list: the line that
+            // opens the rest is the last track either way.
+            assert_eq!(t.rows().len(), if rows_open { 9 } else { 5 }, "{what}");
+            assert!(t.has_more());
+            let last = *t.rows().last().unwrap();
             let (top, h) = t.track_span(Track::Row(last));
-            assert_eq!(top + h, t.tracks_height(&frame(false)), "per player: {per_player}");
+            assert_eq!(top + h, t.track_span(Track::More).0, "{what}");
+            let (top, h) = t.track_span(Track::More);
+            assert_eq!(top + h, t.tracks_height(&frame(false)), "{what}");
             let (top, h) = t.track_span(Track::Lead);
             assert_eq!(top + h, t.tracks_height(&frame(true)));
             let (gap_top, gap_h) = t.track_span(Track::Gap);
@@ -2345,6 +2978,13 @@ mod tests {
             let (head_top, head_h) = t.track_span(Track::ListHead);
             assert_eq!(head_top + head_h, t.track_span(Track::Row(0)).0);
         }
+        // A source whose every metric is in the short list has no such line.
+        let mut plain = timeline();
+        plain.data.metrics.retain(|m| m.def.tier == 1);
+        assert!(!plain.has_more());
+        let last = *plain.rows().last().unwrap();
+        let (top, h) = plain.track_span(Track::Row(last));
+        assert_eq!(top + h, plain.tracks_height(&frame(false)));
     }
 
     #[test]

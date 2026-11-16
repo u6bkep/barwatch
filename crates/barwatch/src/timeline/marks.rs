@@ -304,6 +304,13 @@ pub struct Marker {
 }
 
 impl Marker {
+    /// The unit that set it off, by the name BAR shows for it; by its
+    /// definition's name where the game gave none.
+    pub fn unit_name<'a>(&'a self, names: &'a super::icons::UnitNames) -> Option<&'a str> {
+        let def = self.unit.as_deref()?;
+        Some(names.get(def).unwrap_or(def))
+    }
+
     /// The picture this marker wants, if any.
     pub fn picture(&self) -> Option<&str> {
         if self.kind == MarkKind::TeamDied {
@@ -335,25 +342,35 @@ pub fn cluster(markers: &[Marker], indices: &[usize], min_gap_s: f32) -> Vec<Clu
             _ => out.push(Cluster { members: vec![i], t: markers[i].t }),
         }
     }
-    for c in &mut out {
-        // The badge shows the most important; ties go to the earliest.
+    // The badge shows the most important; ties go to the earliest. It stands
+    // where its lead happened, so a click lands there too.
+    let lead = |c: &mut Cluster| {
         let lead = *c
             .members
             .iter()
             .max_by(|a, b| {
-                markers[**a]
-                    .kind
-                    .importance()
-                    .total_cmp(&markers[**b].kind.importance())
-                    .then(markers[**b].t.total_cmp(&markers[**a].t))
+                markers[**a].kind.importance().total_cmp(&markers[**b].kind.importance()).then(markers[**b].t.total_cmp(&markers[**a].t))
             })
             .unwrap();
         c.members.retain(|m| *m != lead);
         c.members.insert(0, lead);
-        // The badge stands where its lead happened, so a click lands there too.
         c.t = markers[lead].t;
+    };
+    // A lead late in its cluster can bring its badge onto the next one's: those
+    // two share a badge too, and the merged one may then reach back further.
+    let mut placed: Vec<Cluster> = Vec::with_capacity(out.len());
+    for mut c in out {
+        lead(&mut c);
+        placed.push(c);
+        while placed.len() >= 2 && placed[placed.len() - 1].t - placed[placed.len() - 2].t < min_gap_s {
+            let next = placed.pop().unwrap();
+            let into = placed.last_mut().unwrap();
+            into.members.extend(next.members);
+            into.members.sort_by(|a, b| markers[*a].t.total_cmp(&markers[*b].t));
+            lead(into);
+        }
     }
-    out
+    placed
 }
 
 #[cfg(test)]
@@ -362,6 +379,17 @@ mod tests {
 
     fn mark(t: f32, kind: MarkKind) -> Marker {
         Marker { t, kind, team: 0, unit: None, note: None, sample: false }
+    }
+
+    #[test]
+    fn badges_never_overlap_however_their_leads_fall() {
+        // The second marker leads its cluster and stands 10 s before the third.
+        let markers = vec![mark(0.0, MarkKind::Radar), mark(25.0, MarkKind::Nuke), mark(35.0, MarkKind::Radar)];
+        let clusters = cluster(&markers, &[0, 1, 2], 30.0);
+        for pair in clusters.windows(2) {
+            assert!(pair[1].t - pair[0].t >= 30.0, "{:?}", clusters.iter().map(|c| c.t).collect::<Vec<_>>());
+        }
+        assert_eq!(clusters.iter().map(|c| c.members.len()).sum::<usize>(), 3);
     }
 
     #[test]
