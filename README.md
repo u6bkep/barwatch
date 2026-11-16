@@ -155,7 +155,8 @@ The window renders without a display: `BARWATCH_FIXTURE=<scene>` picks a canned 
 (`empty`, `preparing`, `ready`, `playing`, `failed`, `replays`, `settings`, `consent`,
 and the timeline's `ready-statistics` and `timeline-*`: see `fixtures.rs`; with
 `BARWATCH_FIXTURE_DATA=<BAR data folder>` the marker pictures are read from there)
-and `DAMASCENE_HEADLESS_SHOT=out.png` writes one frame and exits. The same scenes are
+and `DAMASCENE_HEADLESS_SHOT=out.png` writes one frame and exits (`BARWATCH_FIXTURE_SIZE=760x700`
+for another window size, `DAMASCENE_HEADLESS_SCALE=2` for a hiDPI one). The same scenes are
 held to damascene's layout lints in the tests.
 
 ## License

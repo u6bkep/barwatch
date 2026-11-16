@@ -127,6 +127,12 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
     if let Ok(scene) = std::env::var("BARWATCH_FIXTURE") {
         let ui = fixtures::scene(&scene)
             .with_context(|| format!("unknown fixture {scene:?}; known: {}", fixtures::SCENES.join(", ")))?;
+        // `BARWATCH_FIXTURE_SIZE=760x700`: another window size than the default.
+        let size = std::env::var("BARWATCH_FIXTURE_SIZE").ok().and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+        });
+        let viewport = size.map_or(viewport, |(w, h)| Rect::new(0.0, 0.0, w, h));
         return barwatch_host::run_host_app("barwatch", viewport, ui).map_err(|e| anyhow::anyhow!("{e}"));
     }
 

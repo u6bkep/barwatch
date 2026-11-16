@@ -15,7 +15,7 @@ use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const SCENES: [&str; 22] = [
+pub const SCENES: [&str; 24] = [
     "empty",
     "preparing",
     "ready",
@@ -37,6 +37,8 @@ pub const SCENES: [&str; 22] = [
     "timeline-outage",
     "timeline-jump",
     "timeline-silent",
+    "timeline-loading",
+    "timeline-catching-up",
     "timeline-over",
 ];
 
@@ -381,6 +383,18 @@ pub fn scene(name: &str) -> Option<Ui> {
             ui.fixture_party(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.fixture_silent_for(Duration::from_secs(60));
+            }
+        }
+        // A late joiner: the party is well into the game, this engine is still
+        // loading and has not said where it is.
+        "timeline-loading" => {
+            ui.fixture_party(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
+        }
+        // The same engine once loaded, running ahead to the party (at 2:30 so far).
+        "timeline-catching-up" => {
+            ui.fixture_party(server, watching(false, at(150), view(TimelineState::Complete, None, Some(duel))));
+            if let Some(timeline) = ui.fixture_timeline() {
+                timeline.set_catching_up(true);
             }
         }
         // The replay has played to its end; the engine is still open.

@@ -471,6 +471,29 @@ revisit with real games.
   viewer is in game the one-line summary says the same ("…so far, then interrupted").
   REJECTED: putting the note in the header's status caption, which the cursor and the
   jump already use and which is cut short in a narrow window.
+- **A late joiner's loading reads as loading.** Until this viewer's engine has said
+  where it is, the timeline does not know where its game is: the app knows nothing of
+  the party's own position (the server's `GameClock` is an estimate that runs off when
+  viewers change speed with their keys, and is not sent), so the hide rule stays as it
+  was: nothing past the start shows while the future is hidden. What changes is what
+  is said. Header: the clock reads "unknown" and the game's chip "–:––"; the status is
+  "Your game is loading" (then, past the 30 s grace, "Waiting for your game" beside
+  the existing silence notice), "Your game is catching up" while it runs ahead, then
+  "Following the game". The gutters say "Hidden until your game has loaded" where
+  numbers exist (not "Waiting for the first numbers", which stays for statistics that
+  do not exist yet), and the fog says "Shown once your game has loaded" (while
+  catching up, "Not reached yet"). The badge in the replay line is "Game loading",
+  "Game open" (silent past the grace: open, but not saying), "Catching up", and "In
+  game" only once the engine reports at the party's pace. Catching up is told by the
+  app from consecutive reports: more than three times the reported speed in game
+  seconds per wall second, plus 2 s of slack. No jump is offered before the first
+  report (the game may already be past the cursor). With the future shown, the
+  readouts are no longer held back before the first sample (`started()` only gates
+  while hiding).
+  REJECTED: revealing up to the last jump's target (`SessionView.jump`), a real lower
+  bound on the party's position; it is rare (a jump before someone joins) and lines
+  that run past a game line still at the start read as a fault. REJECTED: sending the
+  server's `GameClock` estimate; it can run ahead of the party and give the future away.
 
 ## 6. Testing
 

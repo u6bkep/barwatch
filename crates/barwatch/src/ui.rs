@@ -4,6 +4,7 @@ use crate::backend::{Backend, Cmd, Msg};
 use crate::client::{self, Stage};
 use crate::config::Config;
 use crate::datadir::{self, DataDir};
+use crate::position::{self, Position};
 use crate::replays::LocalReplay;
 use crate::timeline::{self, icons, Icons, Timeline};
 use crate::uri;
@@ -54,6 +55,8 @@ struct Watch {
     /// under way; the one already named when this viewer got into the game is
     /// not (the engine is catching up to the party, not to that jump).
     jump_seen: Option<JumpView>,
+    /// The engine's report before the latest, to tell how fast it goes.
+    last_report: Option<Position>,
 }
 
 /// Marker pictures and unit names from the installed game (DESIGN.md §5.6).
@@ -105,6 +108,7 @@ impl Party {
                 in_game: false,
                 applied: None,
                 jump_seen: None,
+                last_report: None,
             });
         }
         let Some(watch) = &mut self.watch else { return };
@@ -114,8 +118,17 @@ impl Party {
             watch.timeline.restart();
             watch.run = session.run;
             watch.jump_seen = session.jump;
+            watch.last_report = None;
         }
         watch.in_game = in_game;
+        // A new report: an engine that went much further than its speed
+        // allows since the one before is running ahead to the party.
+        if let Some(position) = update.position.filter(|p| watch.last_report.is_none_or(|l| l.seen != p.seen)) {
+            if let Some(last) = watch.last_report {
+                watch.timeline.set_catching_up(catching_up(&last, &position));
+            }
+            watch.last_report = Some(position);
+        }
         if let Some(view) = &update.timeline {
             if !watch.applied.as_ref().is_some_and(|applied| Arc::ptr_eq(applied, view)) {
                 let (feed, data) = timeline::statistics(view, replay_length(session));
@@ -802,7 +815,7 @@ impl Ui {
             // Watching: the timeline takes the window. What the replay is
             // shrinks to one line, with the party's buttons on it.
             (Some(watch), Some(session)) => {
-                sections.push(self.watching_bar(update, session, party.over));
+                sections.push(self.watching_bar(update, session, party.over, watch.timeline.game_state()));
                 if update.stage != Stage::Playing || party.over {
                     sections.push(status_block(update, party.over));
                 }
@@ -833,11 +846,18 @@ impl Ui {
     /// What is being watched, in one line: the map's picture, the map and
     /// who plays, where this viewer stands, and the party's buttons. The
     /// game's length is left out: the timeline below may be hiding it.
-    fn watching_bar(&self, update: &client::Update, session: &SessionView, over: bool) -> El {
+    /// "In game" only once the game says where it is: an engine that is open
+    /// may still be loading, or running ahead to where the party is.
+    fn watching_bar(&self, update: &client::Update, session: &SessionView, over: bool, game: timeline::GameState) -> El {
         let state = if session.ended {
             badge("Replay finished").muted()
         } else if update.stage == Stage::Playing {
-            badge("In game").success()
+            match game {
+                timeline::GameState::Loading => badge("Game loading").muted(),
+                timeline::GameState::NotSaying => badge("Game open").muted(),
+                timeline::GameState::CatchingUp => badge("Catching up").warning(),
+                timeline::GameState::Running => badge("In game").success(),
+            }
         } else {
             badge("Not in game").muted()
         };
@@ -1041,6 +1061,21 @@ fn party_buttons(update: &client::Update, over: bool) -> (Vec<El>, El) {
     (buttons, button(if over { "Close" } else { "Leave" }).key("party:leave").ghost())
 }
 
+/// Game seconds an engine may go between two reports beyond what its speed
+/// accounts for (the reports come about once a second, read every 0.1 s).
+const CATCH_UP_SLACK_S: f64 = 2.0;
+
+/// Whether an engine that reported `last` and then `now` is running ahead
+/// of its own speed: catching up to the party after joining late or a jump.
+/// Its speed factor says 1 meanwhile, and it reports once a second by the
+/// wall clock with tens of game seconds between reports (DESIGN.md §5.3).
+fn catching_up(last: &Position, now: &Position) -> bool {
+    let wall = now.seen.saturating_duration_since(last.seen).as_secs_f64();
+    let went = (f64::from(now.report.frame) - f64::from(last.report.frame)) / position::FRAMES_PER_SECOND;
+    let pace = if last.report.paused { 0.0 } else { f64::from(last.report.speed.max(now.report.speed)) };
+    went > 3.0 * pace * wall + CATCH_UP_SLACK_S
+}
+
 /// The game's length as the replay's header gives it; a header that gives none
 /// counts as the longest game there is, so that a game position is never cut
 /// short by it (the statistics, once complete, say how long it really was).
@@ -1228,6 +1263,42 @@ mod tests {
             let w = p.watching().expect("in game");
             assert_eq!(w.timeline.game_s(), 300.0);
             assert!(w.timeline.data.metric_index("valueArmy").is_some());
+        }
+
+        /// A position as the engine reports it, read `after` past `t0`.
+        fn report(t0: Instant, after_ms: u64, seconds: u32, paused: bool) -> Option<Position> {
+            let report = position::Report { frame: seconds * 30, speed: 1.0, paused };
+            Some(Position { report, seen: t0 + Duration::from_millis(after_ms) })
+        }
+
+        /// A late joiner's engine: loading, then running ahead to the party,
+        /// then going at its pace; the timeline says which.
+        #[test]
+        fn a_late_joiner_is_loading_then_catching_up_then_in_game() {
+            use timeline::GameState;
+            let mut p = party(watching(false, None, stats()));
+            let state = |p: &Party| p.watching().unwrap().timeline.game_state();
+            assert_eq!(state(&p), GameState::Loading);
+            let t0 = Instant::now();
+            // The first report says nothing of pace yet.
+            next(&mut p, |u| u.position = report(t0, 0, 4, false));
+            assert_eq!(state(&p), GameState::Running);
+            // A second on: 40 game seconds further at speed 1.
+            next(&mut p, |u| u.position = report(t0, 1000, 44, false));
+            assert_eq!(state(&p), GameState::CatchingUp);
+            // The same report again (an update about something else) changes nothing.
+            next(&mut p, |u| u.position = report(t0, 1000, 44, false));
+            assert_eq!(state(&p), GameState::CatchingUp);
+            next(&mut p, |u| u.position = report(t0, 2000, 270, false));
+            assert_eq!(state(&p), GameState::CatchingUp);
+            // There: one game second a second.
+            next(&mut p, |u| u.position = report(t0, 3000, 271, false));
+            assert_eq!(state(&p), GameState::Running);
+            // A pause and a resume are not a catch-up.
+            next(&mut p, |u| u.position = report(t0, 4000, 272, true));
+            next(&mut p, |u| u.position = report(t0, 9000, 272, false));
+            next(&mut p, |u| u.position = report(t0, 10_000, 273, false));
+            assert_eq!(state(&p), GameState::Running);
         }
 
         #[test]

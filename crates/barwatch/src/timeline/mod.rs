@@ -110,6 +110,8 @@ const LOADING_GRACE: Duration = Duration::from_secs(30);
 /// Without a game position there is no telling when a jump has arrived: it is
 /// shown for this long (a real engine caught up four minutes in under five seconds).
 const BLIND_JUMP_SHOWN: Duration = Duration::from_secs(8);
+/// The game's time on its chip while it has not said where it is.
+const UNKNOWN_CLOCK: &str = "–:––";
 /// Statistics this far behind the game are worth a word in the header.
 const LAG_WORTH_SAYING_S: f32 = 30.0;
 
@@ -274,6 +276,20 @@ impl Feed {
     }
 }
 
+/// What this viewer's game is doing, as far as the timeline can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameState {
+    /// It has not said where it is since it started, and may still be loading.
+    Loading,
+    /// It has not said where it is for longer than loading takes: user
+    /// widgets switched off in BAR, or stuck.
+    NotSaying,
+    /// It is running ahead to where the party is (joining late, or a jump).
+    CatchingUp,
+    /// It says where it is, and goes at the party's pace.
+    Running,
+}
+
 /// What the timeline asks of whoever hosts it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -301,6 +317,8 @@ pub struct Timeline {
     game_s: f32,
     /// The game has said where it is at least once since it started.
     reported: bool,
+    /// The game is running ahead to where the party is, as the host tells.
+    catching_up: bool,
     /// Since when the game has not been saying where it is; `None` while it does.
     silent_since: Option<Instant>,
     /// The viewer chose to use the timeline without a game position: no game
@@ -374,6 +392,7 @@ impl Timeline {
             unit_names: UnitNames::default(),
             game_s: 0.0,
             reported: false,
+            catching_up: false,
             silent_since: None,
             free: false,
             cursor: None,
@@ -522,6 +541,7 @@ impl Timeline {
     pub fn restart(&mut self) {
         self.game_s = 0.0;
         self.reported = false;
+        self.catching_up = false;
         self.silent_since = None;
         self.free = false;
         self.cursor = None;
@@ -586,6 +606,27 @@ impl Timeline {
         }
     }
 
+    /// The host's word on whether the game is running ahead to where the
+    /// party is: it alone sees how fast the reports come.
+    pub fn set_catching_up(&mut self, catching_up: bool) {
+        self.catching_up = catching_up;
+    }
+
+    /// What this viewer's game is doing, as far as the timeline can tell.
+    pub fn game_state(&self) -> GameState {
+        if !self.reported {
+            if self.silence_shows() {
+                GameState::NotSaying
+            } else {
+                GameState::Loading
+            }
+        } else if self.catching_up {
+            GameState::CatchingUp
+        } else {
+            GameState::Running
+        }
+    }
+
     /// The game has been silent long enough to say so.
     fn silence_shows(&self) -> bool {
         let grace = if self.reported { Duration::ZERO } else { LOADING_GRACE };
@@ -642,9 +683,10 @@ impl Timeline {
         self.hide_future && !self.free
     }
 
-    /// The game has got far enough for there to be numbers.
+    /// The game has got far enough for there to be numbers, or nothing is
+    /// being held back for it.
     fn started(&self) -> bool {
-        self.free || self.game_s >= self.data.period_s
+        self.free || !self.hiding() || self.game_s >= self.data.period_s
     }
 
     /// Whether the numbers at `t` may be shown.
@@ -669,7 +711,14 @@ impl Timeline {
         if !self.has_data {
             Some("No statistics")
         } else if !self.started() {
-            Some("Waiting for the first numbers")
+            // A game that has not said where it is yet (a late joiner's
+            // engine loading) may be anywhere: numbers there are, but
+            // nothing can be shown until it says.
+            Some(if !self.reported && self.data.computed_s > 0.0 {
+                "Hidden until your game has loaded"
+            } else {
+                "Waiting for the first numbers"
+            })
         } else if self.hiding() && t > self.game_s {
             Some("Hidden until the game gets there")
         } else if t > self.data.computed_s {
@@ -741,7 +790,11 @@ impl Timeline {
             // Any moment may be ahead of a game that does not say where it is.
             return self.cursor.filter(|c| *c >= MIN_JUMP_S && self.jump.is_none());
         }
-        self.cursor.filter(|c| *c > self.game_s + MIN_JUMP_S && self.jump.is_none() && self.game_s < self.data.duration_s)
+        // A game that has not said where it is may be past any moment: a
+        // jump there could move nobody.
+        self.cursor.filter(|c| {
+            self.reported && *c > self.game_s + MIN_JUMP_S && self.jump.is_none() && self.game_s < self.data.duration_s
+        })
     }
 
     fn marker_visible(&self, m: &Marker) -> bool {
@@ -1047,7 +1100,9 @@ impl Timeline {
     fn header(&self, f: &Frame) -> El {
         let d = &self.data;
         let over = !self.free && self.game_s >= d.duration_s;
-        let mut clock_line = if self.free {
+        // Without a game position, or before the game has said where it is
+        // (the game line waits at the start, but the game may be anywhere).
+        let mut clock_line = if self.free || !self.reported {
             vec![text("unknown").heading().muted()]
         } else {
             vec![text(clock(self.game_s)).heading().tabular_numerals()]
@@ -1116,7 +1171,9 @@ impl Timeline {
             )
         } else if let Some(c) = self.cursor {
             let delta = c - self.game_s;
-            let detail = if delta >= 0.0 {
+            let detail = if !self.reported {
+                "Your game has not said where it is yet".to_owned()
+            } else if delta >= 0.0 {
                 if self.revealed(c) || !self.has_data {
                     format!("{} ahead of the game", clock(delta))
                 } else {
@@ -1137,14 +1194,14 @@ impl Timeline {
                 detail,
             )
         } else {
-            let words = if over {
-                "The game is over"
-            } else if !self.reported {
-                "Waiting for the game to start"
-            } else {
-                "Following the game"
+            let (words, detail) = match self.game_state() {
+                _ if over => ("The game is over", hint),
+                GameState::Loading => ("Your game is loading", "The timeline follows it once it says where it is".into()),
+                GameState::NotSaying => ("Waiting for your game", hint),
+                GameState::CatchingUp => ("Your game is catching up", "It runs fast until it reaches the party".into()),
+                GameState::Running => ("Following the game", hint),
             };
-            (row([status_dot(game_color()), text(words)]).gap(tokens::SPACE_2).align(Align::Center), hint)
+            (row([status_dot(game_color()), text(words)]).gap(tokens::SPACE_2).align(Align::Center), detail)
         };
         let mut status_col = vec![status];
         if !detail.is_empty() {
@@ -1574,9 +1631,7 @@ impl Timeline {
         ])
         .gap(tokens::SPACE_2)
         .align(Align::Center)];
-        if !self.started() {
-            lines.push(text("Waiting for the first numbers").caption().muted());
-        } else if let Some(why) = self.hidden_reason(at) {
+        if let Some(why) = self.hidden_reason(at) {
             lines.push(text(why).caption().muted());
         } else {
             let i = d.sample_index(at);
@@ -2063,8 +2118,14 @@ impl Timeline {
                 // Not where the cursor's line would run through the words.
                 let middle = (g + 1.0) / 2.0 * f.w;
                 let struck = self.cursor.is_some_and(|c| (frac(c, f.end_s) * f.w - middle).abs() < 52.0);
-                if fog_w > 140.0 && self.jump.is_none() && !struck {
-                    items.push(words(g, 1.0, "Not played yet"));
+                // A game that has not said where it is may be past here already.
+                let say = match self.game_state() {
+                    GameState::Loading | GameState::NotSaying => "Shown once your game has loaded",
+                    GameState::CatchingUp => "Not reached yet",
+                    GameState::Running => "Not played yet",
+                };
+                if fog_w > if self.reported { 140.0 } else { 240.0 } && self.jump.is_none() && !struck {
+                    items.push(words(g, 1.0, say));
                 }
             } else {
                 items.push((
@@ -2343,7 +2404,10 @@ impl Timeline {
         for c in self.chips(f) {
             let place = |h: f32, top: f32| Place::Tag { at: c.at, w: None, h, top, anchor: c.anchor };
             let el = match c.what {
-                ChipKind::Game => (place(20.0, 4.0), chip(clock(self.game_s), game_color())),
+                ChipKind::Game => {
+                    let label = if self.reported { clock(self.game_s) } else { UNKNOWN_CLOCK.into() };
+                    (place(20.0, 4.0), chip(label, game_color()))
+                }
                 ChipKind::Cursor(t) => (place(20.0, 4.0), chip(clock(t), cursor_color())),
                 ChipKind::Hover(t) => (
                     place(20.0, 4.0),
@@ -3091,6 +3155,44 @@ mod tests {
         t.data.computed_s = 360.0;
         t.feed = Feed::Building;
         assert!(!has_key(&t.view(&cx), "tl:stats-notice"));
+    }
+
+    /// A game that has not said where it is (a late joiner's engine loading)
+    /// shows nothing past the start, and says why; with the future shown,
+    /// everything that exists shows whatever the game is doing.
+    #[test]
+    fn a_loading_game_hides_the_numbers_and_says_why() {
+        let theme = Theme::default();
+        let cx = BuildCx::new(&theme).with_viewport(1180.0, 900.0);
+        let mut t = Timeline::new(two_sided([&[1.0; 160], &[2.0; 160]]));
+        t.set_game_silent();
+        assert_eq!(t.game_state(), GameState::Loading);
+        assert_eq!(t.drawable_samples(), 1);
+        assert_eq!(t.hidden_reason(0.0), Some("Hidden until your game has loaded"));
+        let words = texts(&t.view(&cx)).join("\n");
+        assert!(words.contains("Your game is loading") && !words.contains("Waiting for the first numbers"), "{words}");
+        assert!(words.contains("unknown") && words.contains(UNKNOWN_CLOCK), "{words}");
+        t.hide_future = false;
+        assert_eq!(t.hidden_reason(t.readout_s()), None);
+        assert_eq!(t.hidden_reason(900.0), None);
+        // Loading for longer than loading takes: said as such.
+        t.hide_future = true;
+        t.fixture_silent_for(LOADING_GRACE);
+        assert_eq!(t.game_state(), GameState::NotSaying);
+        // It reports, and runs ahead.
+        t.set_game(150.0);
+        t.set_catching_up(true);
+        assert_eq!(t.game_state(), GameState::CatchingUp);
+        assert!(texts(&t.view(&cx)).join("\n").contains("Your game is catching up"));
+        t.set_catching_up(false);
+        assert_eq!(t.game_state(), GameState::Running);
+        // Statistics that do not exist yet are waited for, not hidden.
+        let mut empty = Timeline::waiting(1200.0);
+        empty.set_game_silent();
+        assert_eq!(empty.game_state(), GameState::Loading);
+        empty.has_data = true;
+        empty.data.computed_s = 0.0;
+        assert_eq!(empty.hidden_reason(0.0), Some("Waiting for the first numbers"));
     }
 
     #[test]
