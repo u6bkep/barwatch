@@ -246,6 +246,11 @@ pub(crate) struct Link {
 }
 
 impl Link {
+    #[cfg(test)]
+    pub(crate) fn for_test(socket: UdpSocket, peer: SocketAddr) -> Link {
+        Link { socket, peer: Some(peer) }
+    }
+
     /// Sends a command (`/skip 60`) or, without a leading slash, a chat line from the
     /// server. Dropped silently while the server has not spoken yet.
     async fn send(&self, text: &str) {

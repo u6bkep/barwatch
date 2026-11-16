@@ -15,6 +15,13 @@ mod state;
 mod stats_client;
 mod timeline;
 
+// The fake stats service of `examples/fake_stats`, for the tests that follow it.
+#[cfg(test)]
+#[path = "../examples/fake_stats/service.rs"]
+mod fake_service;
+#[cfg(test)]
+mod stats_tests;
+
 use anyhow::{Context, Result};
 use barwatch_core::api::Phase;
 use clap::Parser;
