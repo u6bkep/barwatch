@@ -36,8 +36,8 @@ services:
 volumes:
   barwatch-data:
 
-# The token file, from `bar-replays token add --name barwatch --role client > stats.token`
-# (readable by the container's user, uid 1000, and no one else):
+# The token file, readable by the container's user (uid 1000) and no one else:
+#   (umask 077; bar-replays token add --name barwatch --role client > stats.token)
 # secrets:
 #   stats_token:
 #     file: ./stats.token
