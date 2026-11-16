@@ -205,9 +205,10 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
         tokio::select! {
             _ = &mut run => {}
             _ = tokio::signal::ctrl_c() => {
-                // Let the client leave properly: it closes the engine and tells the server.
+                // Let the client leave properly: it closes the engine (asking it
+                // to leave the game, up to about 6 s) and tells the server (up to 5 s).
                 let _ = tx.send(client::Command::Leave);
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(8), run).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(13), run).await;
             }
         }
         ticker.abort();

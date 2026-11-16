@@ -465,10 +465,12 @@ revisit with real games.
 - **A stats outage is said, and is not the end.** With a document there, `unavailable`
   is an outage: the server keeps the document and keeps trying (service out of reach,
   a turn to wait for, a token refused, records it cannot read yet; all retried). Only
-  `failed` is final. While either holds and the statistics stop short of the game's
+  `failed` says the numbers stop, and no more than that they stopped: a game the
+  service failed is asked about again every 30 s (`FAILED_RECHECK`) and would grow
+  again if the service ran it once more. While either holds and the statistics stop short of the game's
   end, a notice above the tracks gives the server's note: "Statistics interrupted"
-  (outage; what came stays, the rest fills in once they come again) or "No more
-  statistics for this replay" (failed). The lag badge stays "Statistics N behind"
+  (outage; what came stays, the rest fills in once they come again) or "Statistics
+  stopped" (failed). The lag badge stays "Statistics N behind"
   through an outage, with the note as its tooltip; "No statistics after X" only once
   failed. The band past the statistics stands still during an outage ("Waiting for the
   stats service") instead of shimmering as if they were being worked out. Before the
@@ -483,7 +485,8 @@ revisit with real games.
   is said. Header: the clock reads "unknown" and the game's chip "–:––"; the status is
   "Your game is loading" (then, past the 30 s grace, "Waiting for your game" beside
   the existing silence notice), "Your game is catching up" while it runs ahead, then
-  "Following the game". The gutters say "Hidden until your game has loaded" where
+  "Following the game"; between the first report and the second, whose distance tells
+  the pace, it is "Your game is starting" and the badge stays "Game loading". The gutters say "Hidden until your game has loaded" where
   numbers exist (not "Waiting for the first numbers", which stays for statistics that
   do not exist yet), and the fog says "Shown once your game has loaded" (while
   catching up, "Not reached yet"). The badge in the replay line is "Game loading",
@@ -525,7 +528,12 @@ revisit with real games.
   turn, each step only if the one before did not close the engine: the widget's quit
   file (2.5 s; every platform, once the game has loaded with user widgets on), then on
   Unix SIGTERM (2.5 s), then a kill; the quit file is removed afterwards and before
-  every launch. Measured with real engines (2026.07.04) against a local barwatchd, two
+  every launch unless it is under 10 s old (then it belongs to the engine of a party
+  just left, still closing, which would otherwise be killed; it is gone long before the
+  new engine has loaded). The engine runs in a process group of its own, so a Ctrl+C
+  in the terminal reaches the app, which closes it this way, and not the headless
+  engine, which would die without leaving. Closing the app's window does not close the
+  engine (it never did): it watches on, in the game. Measured with real engines (2026.07.04) against a local barwatchd, two
   viewers in one party: through the widget the engine logs `[QuitAction] user exited
   to system`, shuts down in order, and the server drops it within 2 s, headless and
   windowed alike (and closes a party whose last viewer left within 5 s). SIGTERM: the

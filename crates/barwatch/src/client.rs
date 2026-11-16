@@ -107,6 +107,8 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const QUIT_BY_WIDGET: Duration = Duration::from_millis(2500);
 #[cfg(unix)]
 const QUIT_BY_SIGNAL: Duration = Duration::from_millis(2500);
+/// A request to leave younger than this is an engine's that is closing now.
+const QUIT_FILE_FRESH: Duration = Duration::from_secs(10);
 
 struct Client {
     http: reqwest::Client,
@@ -430,7 +432,6 @@ impl Client {
         self.settings.data.root.join("barwatch_engine.log")
     }
 
-
     /// Starts the engine as a spectator of the running party.
     fn launch(&self, engine_dir: &Path, session: &SessionView, name: &str) -> Result<tokio::process::Child> {
         let port = session.game_port.context("the server did not say which port to connect to")?;
@@ -454,11 +455,19 @@ impl Client {
         let log_path = self.engine_log();
         let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
         // A request to leave left over from an engine before (the app was
-        // killed while closing it) would end this one at once.
+        // killed while closing it) would end this one once it has loaded. A
+        // fresh one belongs to the engine of a party just left, closing now:
+        // `close_engine` takes it away within seconds, long before this
+        // engine has loaded, and taken away now that engine would be killed.
         if let Some(quit) = position::quit_file() {
-            match std::fs::remove_file(&quit) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("removing {}: {e}", quit.display()),
-                _ => {}
+            let fresh = std::fs::metadata(&quit)
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < QUIT_FILE_FRESH));
+            if !fresh {
+                match std::fs::remove_file(&quit) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("removing {}: {e}", quit.display()),
+                    _ => {}
+                }
             }
         }
         if let Some(program) = stand_in_engine() {
@@ -482,6 +491,11 @@ impl Client {
             Some(Err(e)) => eprintln!("barwatch: could not write the position reporter: {e}"),
             None => eprintln!("barwatch: no local data folder for the position reporter"),
         }
+        // A group of its own: a Ctrl+C in the terminal the app was started
+        // from reaches the app, which closes the engine properly, and not the
+        // engine, which (headless) would die without leaving the game.
+        #[cfg(unix)]
+        command.process_group(0);
         command
             .current_dir(engine_dir)
             .arg("--write-dir")

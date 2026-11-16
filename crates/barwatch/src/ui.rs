@@ -116,6 +116,7 @@ impl Party {
         // same one again. Either way it starts from the beginning.
         if in_game && (!watch.in_game || watch.run != session.run) {
             watch.timeline.restart();
+            watch.timeline.await_pace();
             watch.run = session.run;
             watch.jump_seen = session.jump;
             watch.last_report = None;
@@ -128,6 +129,10 @@ impl Party {
                 watch.timeline.set_catching_up(catching_up(&last, &position));
             }
             watch.last_report = Some(position);
+        } else if update.position.is_none() && watch.last_report.is_some() {
+            // Silent (stuck, or closed): whatever it was doing, it is not
+            // running ahead now.
+            watch.timeline.set_catching_up(false);
         }
         if let Some(view) = &update.timeline {
             if !watch.applied.as_ref().is_some_and(|applied| Arc::ptr_eq(applied, view)) {
@@ -433,6 +438,11 @@ impl Ui {
         let session = update.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         self.party = Some(Party::new(server, session));
         self.fixture_update(update);
+        // One report is all a canned scene has: its game goes at the party's
+        // pace unless the scene says otherwise.
+        if let Some(timeline) = self.fixture_timeline() {
+            timeline.set_catching_up(false);
+        }
     }
 
     /// The next thing the party's client says, as the window takes it in.
@@ -1105,7 +1115,7 @@ fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
             format!("Statistics: {} so far, then interrupted. {why}", so_far(doc))
         }
         (timeline::Feed::Failed(why), Some(doc)) if !doc.complete => {
-            format!("Statistics: {}, and no further. {why}", so_far(doc))
+            format!("Statistics: {}, then stopped. {why}", so_far(doc))
         }
         (timeline::Feed::Unavailable(why) | timeline::Feed::Failed(why), _) => format!("Statistics: none. {why}"),
         (timeline::Feed::Complete, None) => "Statistics: none. The server sent none.".to_owned(),
@@ -1285,9 +1295,9 @@ mod tests {
             let state = |p: &Party| p.watching().unwrap().timeline.game_state();
             assert_eq!(state(&p), GameState::Loading);
             let t0 = Instant::now();
-            // The first report says nothing of pace yet.
+            // The first report says nothing of pace yet: not "in game" so soon.
             next(&mut p, |u| u.position = report(t0, 0, 4, false));
-            assert_eq!(state(&p), GameState::Running);
+            assert_eq!(state(&p), GameState::Loading);
             // A second on: 40 game seconds further at speed 1.
             next(&mut p, |u| u.position = report(t0, 1000, 44, false));
             assert_eq!(state(&p), GameState::CatchingUp);
@@ -1296,6 +1306,10 @@ mod tests {
             assert_eq!(state(&p), GameState::CatchingUp);
             next(&mut p, |u| u.position = report(t0, 2000, 270, false));
             assert_eq!(state(&p), GameState::CatchingUp);
+            // Gone quiet: not running ahead any more, whatever it was doing.
+            next(&mut p, |u| u.position = None);
+            assert_eq!(state(&p), GameState::Running);
+            next(&mut p, |u| u.position = report(t0, 2500, 270, false));
             // There: one game second a second.
             next(&mut p, |u| u.position = report(t0, 3000, 271, false));
             assert_eq!(state(&p), GameState::Running);

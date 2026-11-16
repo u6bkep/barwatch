@@ -293,7 +293,8 @@ impl Feed {
 /// What this viewer's game is doing, as far as the timeline can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameState {
-    /// It has not said where it is since it started, and may still be loading.
+    /// It has not said where it is since it started, and may still be loading;
+    /// or it has just started saying, and its pace is not known yet.
     Loading,
     /// It has not said where it is for longer than loading takes: user
     /// widgets switched off in BAR, or stuck.
@@ -333,6 +334,9 @@ pub struct Timeline {
     reported: bool,
     /// The game is running ahead to where the party is, as the host tells.
     catching_up: bool,
+    /// The host has yet to say whether the game goes at the party's pace
+    /// ([`Timeline::await_pace`]).
+    pace_pending: bool,
     /// Since when the game has not been saying where it is; `None` while it does.
     silent_since: Option<Instant>,
     /// The viewer chose to use the timeline without a game position: no game
@@ -407,6 +411,7 @@ impl Timeline {
             game_s: 0.0,
             reported: false,
             catching_up: false,
+            pace_pending: false,
             silent_since: None,
             free: false,
             cursor: None,
@@ -566,6 +571,7 @@ impl Timeline {
         self.game_s = 0.0;
         self.reported = false;
         self.catching_up = false;
+        self.pace_pending = false;
         self.silent_since = None;
         self.free = false;
         self.cursor = None;
@@ -634,6 +640,14 @@ impl Timeline {
     /// party is: it alone sees how fast the reports come.
     pub fn set_catching_up(&mut self, catching_up: bool) {
         self.catching_up = catching_up;
+        self.pace_pending = false;
+    }
+
+    /// The host will tell whether the game runs ahead ([`Timeline::set_catching_up`]),
+    /// which it can only once two reports have come: until then the game is
+    /// not taken to be at the party's pace.
+    pub fn await_pace(&mut self) {
+        self.pace_pending = true;
     }
 
     /// What this viewer's game is doing, as far as the timeline can tell.
@@ -644,6 +658,9 @@ impl Timeline {
             } else {
                 GameState::Loading
             }
+        } else if self.pace_pending {
+            // It has said where it is once: loaded, its pace not known yet.
+            GameState::Loading
         } else if self.catching_up {
             GameState::CatchingUp
         } else {
@@ -1220,6 +1237,7 @@ impl Timeline {
         } else {
             let (words, detail) = match self.game_state() {
                 _ if over => ("The game is over", hint),
+                GameState::Loading if self.reported => ("Your game is starting", hint),
                 GameState::Loading => ("Your game is loading", "The timeline follows it once it says where it is".into()),
                 GameState::NotSaying => ("Waiting for your game", hint),
                 GameState::CatchingUp => ("Your game is catching up", "It runs fast until it reaches the party".into()),
@@ -1296,9 +1314,9 @@ impl Timeline {
     /// once the statistics cover the whole game: nothing is missing then.
     fn statistics_notice(&self) -> Option<El> {
         let why = self.feed.note().filter(|_| self.has_data && self.data.computed_s < self.data.duration_s)?;
-        let title = if self.feed.stopped() { "No more statistics for this replay" } else { "Statistics interrupted" };
+        let title = if self.feed.stopped() { "Statistics stopped" } else { "Statistics interrupted" };
         let detail = if self.feed.stopped() {
-            format!("{why} What came before stays; the game and the jump button carry on.")
+            format!("{why} What came before stays; the game and the jump button carry on without the rest.")
         } else {
             format!("{why} What came so far stays, and the rest fills in once they come again.")
         };
@@ -1371,11 +1389,8 @@ impl Timeline {
         // may stand (the game line at game over): gathered where they will be
         // drawn, so that one pulled in from an end does not land on its neighbour.
         let reach_s = (BADGE_BOX / 2.0 + BADGE_END_CLEAR) / f.w * f.end_s;
-        let drawn: Vec<Marker> = d
-            .markers
-            .iter()
-            .map(|m| Marker { t: m.t.clamp(reach_s, (f.end_s - reach_s).max(reach_s)), ..m.clone() })
-            .collect();
+        let drawn: Vec<Marker> =
+            d.markers.iter().map(|m| Marker { t: m.t.clamp(reach_s, (f.end_s - reach_s).max(reach_s)), ..m.clone() }).collect();
         let mut items = Vec::new();
         let mut labels = Vec::new();
         for lane in 0..lanes {
@@ -2161,13 +2176,14 @@ impl Timeline {
                 let fog_w = (1.0 - g) * f.w;
                 // Not where the cursor's line would run through the words.
                 let middle = (g + 1.0) / 2.0 * f.w;
-                let struck = self.cursor.is_some_and(|c| (frac(c, f.end_s) * f.w - middle).abs() < 52.0);
                 // A game that has not said where it is may be past here already.
                 let say = match self.game_state() {
-                    GameState::Loading | GameState::NotSaying => "Shown once your game has loaded",
-                    GameState::CatchingUp => "Not reached yet",
+                    _ if !self.reported => "Shown once your game has loaded",
+                    GameState::Loading | GameState::NotSaying | GameState::CatchingUp => "Not reached yet",
                     GameState::Running => "Not played yet",
                 };
+                let half = text_width(say, FontWeight::Regular) / 2.0 + 8.0;
+                let struck = self.cursor.is_some_and(|c| (frac(c, f.end_s) * f.w - middle).abs() < half);
                 if fog_w > if self.reported { 140.0 } else { 240.0 } && self.jump.is_none() && !struck {
                     items.push(words(g, 1.0, say));
                 }
@@ -3224,7 +3240,7 @@ mod tests {
         // A failure is final.
         t.feed = Feed::Failed("The statistics service could not work out this game: boom".into());
         let words = texts(&t.view(&cx)).join("\n");
-        assert!(words.contains("No more statistics for this replay") && words.contains("boom"), "{words}");
+        assert!(words.contains("Statistics stopped") && words.contains("boom"), "{words}");
         assert!(words.contains("No statistics after 6:00"), "{words}");
         // Statistics that cover the whole game miss nothing: no notice.
         t.data.computed_s = t.data.duration_s;
