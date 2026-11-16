@@ -245,7 +245,13 @@ impl Fake {
             });
         }
         if sim_frame >= self.end_frame {
-            return Some(Now { state: "ingested", frame: self.end_frame, available: self.lines.len(), complete: true, error: None });
+            return Some(Now {
+                state: "ingested",
+                frame: self.end_frame,
+                available: self.lines.len(),
+                complete: true,
+                error: None,
+            });
         }
         Some(Now { state: "simulating", frame: sim_frame, available: released(sim_frame), complete: false, error: None })
     }
@@ -503,8 +509,7 @@ async fn records(State(fake): State<Arc<Fake>>, Path(id): Path<String>, Query(q)
     if ours && fake.now().is_none() || !ours && !fake.sim.lock().unwrap().others.contains(&id) {
         return err(StatusCode::NOT_FOUND, &format!("unknown game {id}"));
     }
-    let actions: Option<HashSet<String>> =
-        q.actions.filter(|a| !a.is_empty()).map(|a| a.split(',').map(str::to_owned).collect());
+    let actions: Option<HashSet<String>> = q.actions.filter(|a| !a.is_empty()).map(|a| a.split(',').map(str::to_owned).collect());
     let follow = q.follow == Some(1);
     let from = q.from.unwrap_or(0);
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
@@ -635,7 +640,9 @@ async fn produce(
         if pos > start || due || complete || !follow {
             let frame = if pos > 0 { fake.lines[pos - 1].written } else { 0 };
             let next = (pos as u64).max(from);
-            batch.extend_from_slice(json!({"action": "_cursor", "next": next, "frame": frame, "complete": complete}).to_string().as_bytes());
+            batch.extend_from_slice(
+                json!({"action": "_cursor", "next": next, "frame": frame, "complete": complete}).to_string().as_bytes(),
+            );
             batch.push(b'\n');
             last_cursor = Some(Instant::now());
             if !out.send(batch).await {

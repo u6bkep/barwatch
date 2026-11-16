@@ -131,7 +131,8 @@ const VALUE_NOTE: &str = "Counted by the stats service, not by BAR: metal cost o
 use Group::*;
 use Unit::*;
 
-pub const METAL_INCOME: MetricDef = MetricDef::new("metalIncome", "Metal income", "Metal income per second", PerSecond, Economy, 1);
+pub const METAL_INCOME: MetricDef =
+    MetricDef::new("metalIncome", "Metal income", "Metal income per second", PerSecond, Economy, 1);
 pub const ENERGY_INCOME: MetricDef =
     MetricDef::new("energyIncome", "Energy income", "Energy income per second", PerSecond, Economy, 1);
 pub const METAL_EXPENSE: MetricDef =
@@ -143,7 +144,8 @@ pub const METAL_LEVEL: MetricDef =
 pub const ENERGY_LEVEL: MetricDef =
     MetricDef::new("energyLevel", "Energy level", "Energy held, as a share of the room in storage", Percent, Economy, 3);
 pub const METAL_STORED: MetricDef = MetricDef::new("metalStored", "Metal stored", "Metal held in storage", Amount, Economy, 2);
-pub const ENERGY_STORED: MetricDef = MetricDef::new("energyStored", "Energy stored", "Energy held in storage", Amount, Economy, 2);
+pub const ENERGY_STORED: MetricDef =
+    MetricDef::new("energyStored", "Energy stored", "Energy held in storage", Amount, Economy, 2);
 pub const VALUE_ARMY: MetricDef =
     MetricDef::new("valueArmy", "Army value", "Army value: what the armed mobile units cost", Amount, Value, 1).note(VALUE_NOTE);
 pub const VALUE_DEFENSE: MetricDef =
@@ -153,7 +155,8 @@ pub const VALUE_ECONOMY: MetricDef =
     MetricDef::new("valueEconomy", "Economy value", "Economy value: what the energy and metal makers cost", Amount, Value, 2)
         .note(VALUE_NOTE);
 pub const VALUE_UTILITY: MetricDef =
-    MetricDef::new("valueUtility", "Utility value", "Utility value: what everything else cost", Amount, Value, 3).note(VALUE_NOTE);
+    MetricDef::new("valueUtility", "Utility value", "Utility value: what everything else cost", Amount, Value, 3)
+        .note(VALUE_NOTE);
 pub const UNIT_VALUE: MetricDef =
     MetricDef::new("unitValue", "Unit value", "Unit value: what every unit alive cost", Amount, Value, 1).note(VALUE_NOTE);
 pub const UNITS_ALIVE: MetricDef = MetricDef::new("unitsActive", "Units alive", "Units alive", Count, Units, 1)
@@ -168,9 +171,8 @@ pub const UNITS_STOLEN: MetricDef =
 pub const UNITS_RECEIVED: MetricDef =
     MetricDef::new("unitsReceived", "Units received", "Units handed over by allies", Count, Units, 3).total();
 pub const UNITS_SENT: MetricDef = MetricDef::new("unitsSent", "Units sent", "Units handed to allies", Count, Units, 3).total();
-pub const DAMAGE_RATE: MetricDef =
-    MetricDef::new("damageRate", "Damage rate", "Damage done per second", PerSecond, Combat, 1)
-        .note("Worked out here from the damage total, averaged over 45 seconds: single volleys would make it unreadable.");
+pub const DAMAGE_RATE: MetricDef = MetricDef::new("damageRate", "Damage rate", "Damage done per second", PerSecond, Combat, 1)
+    .note("Worked out here from the damage total, averaged over 45 seconds: single volleys would make it unreadable.");
 pub const DAMAGE: MetricDef = MetricDef::new("damageDealt", "Damage dealt", "Damage done", Amount, Combat, 3).total();
 pub const DAMAGE_RECEIVED: MetricDef =
     MetricDef::new("damageReceived", "Damage received", "Damage suffered", Amount, Combat, 3).total();
@@ -405,15 +407,10 @@ impl Data {
             .enumerate()
             .map(|(k, (info, _))| {
                 let side = allies.iter().position(|a| *a == info.ally_team).unwrap();
-                let color = stats
-                    .events
-                    .team_colors
-                    .get(&info.team)
-                    .map(|c| display_color(*c))
-                    .unwrap_or_else(|| {
-                        let (r, g, b) = FALLBACK[(side + k * 2) % FALLBACK.len()];
-                        Color::srgb_u8(r, g, b)
-                    });
+                let color = stats.events.team_colors.get(&info.team).map(|c| display_color(*c)).unwrap_or_else(|| {
+                    let (r, g, b) = FALLBACK[(side + k * 2) % FALLBACK.len()];
+                    Color::srgb_u8(r, g, b)
+                });
                 Team {
                     name: info.name.clone(),
                     color,

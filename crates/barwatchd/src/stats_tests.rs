@@ -142,11 +142,15 @@ fn synth_output(periods: u32) -> Vec<Vec<u8>> {
         let f = 450 * k;
         out.push(json!({"action": "unit_position", "frame": f - 10, "unitID": 100, "x": 1, "z": 2}));
         for team in 0..2 {
-            out.push(json!({"action": "extra_stat_update", "frame": f, "teamID": team, "totalValue": f64::from(k * 100 * (team + 1)),
-                            "armyValue": f64::from(k * 40), "metalCurrent": 300.5, "actions": k * 7}));
-            out.push(json!({"action": "bs_team_resources", "frame": f, "teamID": team, "metalCurrent": 200, "metalStorage": 1000,
+            out.push(
+                json!({"action": "extra_stat_update", "frame": f, "teamID": team, "totalValue": f64::from(k * 100 * (team + 1)),
+                            "armyValue": f64::from(k * 40), "metalCurrent": 300.5, "actions": k * 7}),
+            );
+            out.push(
+                json!({"action": "bs_team_resources", "frame": f, "teamID": team, "metalCurrent": 200, "metalStorage": 1000,
                             "metalIncome": 2.5 + f64::from(k), "metalExpense": 2, "energyCurrent": 500, "energyStorage": 1000,
-                            "energyIncome": 30, "energyExpense": 20}));
+                            "energyIncome": 30, "energyExpense": 20}),
+            );
         }
         out.push(json!({"action": "unit_position", "frame": f + 1, "unitID": 101, "x": 1, "z": 2}));
         for team in 0..2 {
@@ -155,7 +159,9 @@ fn synth_output(periods: u32) -> Vec<Vec<u8>> {
         if k == periods / 2 {
             out.push(json!({"action": "unit_created", "frame": f + 5, "unitID": 200, "teamID": 0, "defID": 2}));
             out.push(json!({"action": "unit_finished", "frame": f + 60, "unitID": 200, "teamID": 0}));
-            out.push(json!({"action": "unit_killed", "frame": f + 90, "unitID": 200, "teamID": 0, "defID": 2, "attackerTeam": 1}));
+            out.push(
+                json!({"action": "unit_killed", "frame": f + 90, "unitID": 200, "teamID": 0, "defID": 2, "attackerTeam": 1}),
+            );
         }
     }
     let end = 450 * periods + 3;
@@ -215,7 +221,11 @@ fn same_doc(got: &TimelineDoc, want: &TimelineDoc, what: &str) {
             let gt = g.and_then(|g| g.get(t));
             if gt != Some(wt) {
                 let at = gt.map_or(0, |gt| gt.iter().zip(wt).take_while(|(a, b)| a == b).count());
-                panic!("{what}: series {k} team {t} differs from sample {at}: got {:?} want {:?}", gt.map(|g| &g[at.min(g.len())..(at + 4).min(g.len())]), &wt[at..(at + 4).min(wt.len())]);
+                panic!(
+                    "{what}: series {k} team {t} differs from sample {at}: got {:?} want {:?}",
+                    gt.map(|g| &g[at.min(g.len())..(at + 4).min(g.len())]),
+                    &wt[at..(at + 4).min(wt.len())]
+                );
             }
         }
     }
@@ -264,7 +274,8 @@ impl Daemon {
     /// A daemon whose BAR archive is a port nobody listens on: tests never reach
     /// the real one.
     async fn start(data: &Path, stats: Option<SocketAddr>, tuning: Tuning) -> Daemon {
-        let nowhere = crate::source::Archive { api: "http://127.0.0.1:9/replays".into(), bucket: "http://127.0.0.1:9/BAR".into() };
+        let nowhere =
+            crate::source::Archive { api: "http://127.0.0.1:9/replays".into(), bucket: "http://127.0.0.1:9/BAR".into() };
         Daemon::start_with(data, stats, tuning, nowhere).await
     }
 
@@ -340,7 +351,11 @@ impl Daemon {
             if finished {
                 return seen;
             }
-            assert!(Instant::now() < until, "timed out; last view {:?}", seen.last().map(|v| (v.state, &v.note, v.doc.as_ref().map(|d| d.frames))));
+            assert!(
+                Instant::now() < until,
+                "timed out; last view {:?}",
+                seen.last().map(|v| (v.state, &v.note, v.doc.as_ref().map(|d| d.frames)))
+            );
         }
     }
 }
@@ -412,7 +427,8 @@ async fn upload_party_grows_to_complete() {
 
     let view = d.session(&id).await;
     assert_eq!(view.game_id.as_deref(), Some(game_id().as_str()));
-    let meta: Value = serde_json::from_slice(&std::fs::read(dir.join("data/sessions").join(&id).join("meta.json")).unwrap()).unwrap();
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("data/sessions").join(&id).join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["game_id"], game_id());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -445,7 +461,10 @@ async fn link_party_through_the_service() {
 }
 
 /// A stand-in for BAR's replay archive that knows one replay; counts its calls.
-async fn start_archive(id: &str, replay: Vec<u8>) -> (crate::source::Archive, Arc<std::sync::atomic::AtomicU64>, tokio::task::JoinHandle<()>) {
+async fn start_archive(
+    id: &str,
+    replay: Vec<u8>,
+) -> (crate::source::Archive, Arc<std::sync::atomic::AtomicU64>, tokio::task::JoinHandle<()>) {
     use axum::extract::Path as P;
     use std::sync::atomic::{AtomicU64, Ordering};
     let hits = Arc::new(AtomicU64::new(0));
@@ -466,7 +485,11 @@ async fn start_archive(id: &str, replay: Vec<u8>) -> (crate::source::Archive, Ar
             "/BAR/demos/{name}",
             axum::routing::get(move |P(name): P<String>| async move {
                 h2.fetch_add(1, Ordering::SeqCst);
-                if name == "2026-01-01_direct.sdfz" { Ok(replay.clone()) } else { Err(axum::http::StatusCode::NOT_FOUND) }
+                if name == "2026-01-01_direct.sdfz" {
+                    Ok(replay.clone())
+                } else {
+                    Err(axum::http::StatusCode::NOT_FOUND)
+                }
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -695,7 +718,11 @@ async fn service_without_records() {
     let (fake, _server, addr) = start_fake(o, None).await;
     let d = Daemon::start(&dir.join("data"), Some(addr), quick()).await;
     let id = d.upload(&replay).await;
-    let seen = d.watch(&id, Duration::from_secs(20), |v| v.state == TimelineState::Unavailable && v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;
+    let seen = d
+        .watch(&id, Duration::from_secs(20), |v| {
+            v.state == TimelineState::Unavailable && v.note.as_deref().is_some_and(|n| n.contains("newer version"))
+        })
+        .await;
     assert!(seen.last().unwrap().doc.is_none());
     assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
     // It asks again now and then, not in a loop.
@@ -828,7 +855,8 @@ async fn followers_take_turns() {
     let a = d.upload(&replay).await;
     let _ = d.watch(&a, Duration::from_secs(20), |v| v.doc.is_some()).await;
     let b = d.upload(&replay).await;
-    let seen = d.watch(&b, Duration::from_secs(20), |v| v.note.as_deref().is_some_and(|n| n.contains("waiting for a turn"))).await;
+    let seen =
+        d.watch(&b, Duration::from_secs(20), |v| v.note.as_deref().is_some_and(|n| n.contains("waiting for a turn"))).await;
     let waiting = seen.last().unwrap();
     assert_eq!((waiting.state, waiting.doc.is_none()), (TimelineState::Unavailable, true));
     let first = d.watch(&a, Duration::from_secs(40), complete).await;
@@ -953,7 +981,15 @@ async fn jumps_are_reported() {
 async fn view_json_is_the_api_type() {
     let slot = timeline::Slot::new(None);
     let v: TimelineView = serde_json::from_slice(&slot.view_json(false).await).unwrap();
-    assert_eq!(v, TimelineView { rev: 1, state: TimelineState::Unavailable, note: Some("This server has no statistics service.".into()), doc: None });
+    assert_eq!(
+        v,
+        TimelineView {
+            rev: 1,
+            state: TimelineState::Unavailable,
+            note: Some("This server has no statistics service.".into()),
+            doc: None
+        }
+    );
     let raw: Value = serde_json::from_slice(&slot.view_json(false).await).unwrap();
     assert_eq!(raw, serde_json::to_value(&v).unwrap());
 }
@@ -997,7 +1033,10 @@ mod odd_services {
                     }
                 }),
             )
-            .route("/api/v1/games/{id}", get(|| async { (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "unknown game"}))) }));
+            .route(
+                "/api/v1/games/{id}",
+                get(|| async { (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "unknown game"}))) }),
+            );
         let d = Daemon::start(&dir.join("data"), Some(serve(router).await), quick()).await;
         let id = d.upload(&synth_replay(GAME)).await;
         let rev = d.app.session(&id).unwrap().read(|st| st.rev);
@@ -1073,7 +1112,13 @@ mod odd_services {
         let (statuses, g) = (counter(), game_id());
         let (s, g1, g2) = (statuses.clone(), g.clone(), g);
         let router = Router::new()
-            .route("/api/v1/replays", put(move || { let g = g1.clone(); async move { axum::Json(json!({"game_id": g, "state": "failed", "error": "x", "rev": 1})) } }))
+            .route(
+                "/api/v1/replays",
+                put(move || {
+                    let g = g1.clone();
+                    async move { axum::Json(json!({"game_id": g, "state": "failed", "error": "x", "rev": 1})) }
+                }),
+            )
             .route(
                 "/api/v1/games/{id}",
                 get(move || {
@@ -1107,18 +1152,27 @@ mod odd_services {
         let st = status.clone();
         let c = calls.clone();
         let router = Router::new()
-            .route("/api/v1/replays", put(move || {
-                let st = st.clone();
-                async move { axum::Json(st) }
-            }))
-            .route("/api/v1/games/{id}", get(move || {
-                let st = status.clone();
-                async move { axum::Json(st) }
-            }))
-            .route("/api/v1/games/{id}/records", get(move || {
-                let n = c.fetch_add(1, SeqCst) + 1;
-                async move { format!("{{\"action\":\"_cursor\",\"next\":{n},\"frame\":0,\"complete\":false}}\n") }
-            }));
+            .route(
+                "/api/v1/replays",
+                put(move || {
+                    let st = st.clone();
+                    async move { axum::Json(st) }
+                }),
+            )
+            .route(
+                "/api/v1/games/{id}",
+                get(move || {
+                    let st = status.clone();
+                    async move { axum::Json(st) }
+                }),
+            )
+            .route(
+                "/api/v1/games/{id}/records",
+                get(move || {
+                    let n = c.fetch_add(1, SeqCst) + 1;
+                    async move { format!("{{\"action\":\"_cursor\",\"next\":{n},\"frame\":0,\"complete\":false}}\n") }
+                }),
+            );
         let d = Daemon::start(&dir.join("data"), Some(serve(router).await), quick()).await;
         let id = d.upload(&synth_replay(GAME)).await;
         for _ in 0..5 {
@@ -1142,27 +1196,41 @@ mod odd_services {
         let st = status.clone();
         let r = refuse.clone();
         let router = Router::new()
-            .route("/api/v1/replays", put(move || {
-                let st = st.clone();
-                async move { axum::Json(st) }
-            }))
-            .route("/api/v1/games/{id}", get(move || {
-                let (r, st) = (r.clone(), status.clone());
-                async move {
-                    if r.load(SeqCst) {
-                        (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "missing or unknown bearer token"})))
-                    } else {
-                        (axum::http::StatusCode::OK, axum::Json(st))
+            .route(
+                "/api/v1/replays",
+                put(move || {
+                    let st = st.clone();
+                    async move { axum::Json(st) }
+                }),
+            )
+            .route(
+                "/api/v1/games/{id}",
+                get(move || {
+                    let (r, st) = (r.clone(), status.clone());
+                    async move {
+                        if r.load(SeqCst) {
+                            (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                axum::Json(json!({"error": "missing or unknown bearer token"})),
+                            )
+                        } else {
+                            (axum::http::StatusCode::OK, axum::Json(st))
+                        }
                     }
-                }
-            }))
-            .route("/api/v1/{*rest}", get(|| async { (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "no such API call"}))) }));
+                }),
+            )
+            .route(
+                "/api/v1/{*rest}",
+                get(|| async { (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "no such API call"}))) }),
+            );
         let d = Daemon::start(&dir.join("data"), Some(serve(router).await), quick()).await;
         let id = d.upload(&synth_replay(GAME)).await;
-        let seen = d.watch(&id, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("does not accept"))).await;
+        let seen =
+            d.watch(&id, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("does not accept"))).await;
         assert_eq!(seen.last().unwrap().state, TimelineState::Unavailable);
         refuse.store(false, SeqCst);
-        let seen = d.watch(&id, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;
+        let seen =
+            d.watch(&id, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;
         assert_eq!(seen.last().unwrap().state, TimelineState::Unavailable);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1177,7 +1245,8 @@ async fn turns_are_not_held_without_a_stream() {
     let mut o = opts(synth_output(4), &replay);
     o.no_records = true;
     let (_fake, _server, addr) = start_fake(o, None).await;
-    let tuning = Tuning { max_followers: 1, records_retry: Duration::from_secs(30), poll_demand: Duration::from_secs(60), ..quick() };
+    let tuning =
+        Tuning { max_followers: 1, records_retry: Duration::from_secs(30), poll_demand: Duration::from_secs(60), ..quick() };
     let d = Daemon::start(&dir.join("data"), Some(addr), tuning).await;
     let a = d.upload(&replay).await;
     let _ = d.watch(&a, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;

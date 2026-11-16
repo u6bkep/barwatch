@@ -32,8 +32,8 @@
 //! that sends nothing for [`STALL`] is dropped and resumed, and one game's stream may
 //! not exceed [`MAX_STREAM_BYTES`] in total.
 
-use crate::stats_client::{GameStatus, StatsClient, SvcError, SvcPhase};
 use crate::state::{App, Session};
+use crate::stats_client::{GameStatus, StatsClient, SvcError, SvcPhase};
 use axum::body::Bytes;
 use barwatch_core::api::TimelineState;
 use barwatch_core::timeline::{self, TimelineBuilder, TimelineDoc};
@@ -202,7 +202,9 @@ impl Inner {
             return (Failed, Some(t.clone()));
         }
         match &self.reg {
-            Reg::NoId => return (Unavailable, say("This replay carries no game id, so the statistics service cannot work on it.")),
+            Reg::NoId => {
+                return (Unavailable, say("This replay carries no game id, so the statistics service cannot work on it."))
+            }
             Reg::Refused(w) => return (Failed, Some(format!("The statistics service would not take this replay: {w}"))),
             Reg::BadToken => return (Unavailable, say("The statistics service does not accept this server.")),
             Reg::Pending => {}
@@ -543,7 +545,10 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
                         builder = None;
                     }
                     FollowEnd::Unknown => {
-                        crate::log(&format!("session {}: the stats service does not know game {id}; registering it again", session.id));
+                        crate::log(&format!(
+                            "session {}: the stats service does not know game {id}; registering it again",
+                            session.id
+                        ));
                         // What was read belongs to a simulation the service no longer
                         // has; the turn is not needed while registering.
                         builder = None;
@@ -632,7 +637,9 @@ async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<
         return Err(Some(Duration::from_secs(3600)));
     };
     let upload = || async {
-        let bytes = tokio::fs::read(session.replay_path()).await.map_err(|e| SvcError::Unreachable(format!("reading the replay: {e}")))?;
+        let bytes = tokio::fs::read(session.replay_path())
+            .await
+            .map_err(|e| SvcError::Unreachable(format!("reading the replay: {e}")))?;
         client.upload(bytes).await
     };
     let answer = if session.bar_replay.is_some() {

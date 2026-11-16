@@ -52,7 +52,15 @@ fn main() -> Result<()> {
     let mut e = String::new();
     use std::fmt::Write;
     writeln!(e, "{} | {} | header {} s", demo.map().unwrap_or("?"), demo.game_version().unwrap_or("?"), demo.game_time_s)?;
-    writeln!(e, "rev {} complete {} frames {} ({})  {:?}", doc.rev, doc.complete, doc.frames, clock(doc.frames), builder.stats())?;
+    writeln!(
+        e,
+        "rev {} complete {} frames {} ({})  {:?}",
+        doc.rev,
+        doc.complete,
+        doc.frames,
+        clock(doc.frames),
+        builder.stats()
+    )?;
     for t in &doc.teams {
         writeln!(
             e,
@@ -74,10 +82,12 @@ fn main() -> Result<()> {
     }
     let mut by_kind: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for m in &doc.marks {
-        by_kind
-            .entry(m.kind.as_str())
-            .or_default()
-            .push(format!("{} t{} {}", clock(m.frame), m.team, m.def.as_deref().unwrap_or("")));
+        by_kind.entry(m.kind.as_str()).or_default().push(format!(
+            "{} t{} {}",
+            clock(m.frame),
+            m.team,
+            m.def.as_deref().unwrap_or("")
+        ));
     }
     writeln!(e, "marks ({}), by kind:", doc.marks.len())?;
     for (k, v) in &by_kind {

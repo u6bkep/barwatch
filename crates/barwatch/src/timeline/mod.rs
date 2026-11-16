@@ -478,12 +478,12 @@ impl Timeline {
             let def = series.def;
             if group != Some(def.group) {
                 group = Some(def.group);
-                items.push(
-                    text(def.group.label())
-                        .caption()
-                        .muted()
-                        .padding(Sides { left: tokens::SPACE_2, top: tokens::SPACE_2, bottom: 2.0, right: tokens::SPACE_2 }),
-                );
+                items.push(text(def.group.label()).caption().muted().padding(Sides {
+                    left: tokens::SPACE_2,
+                    top: tokens::SPACE_2,
+                    bottom: 2.0,
+                    right: tokens::SPACE_2,
+                }));
             }
             items.push(
                 popover::menu_item_checked(def.label, m == chosen)
@@ -1267,9 +1267,12 @@ impl Timeline {
         // Once the game is over nothing is left to hide.
         if !self.free && !over {
             controls.push(
-                row([switch("tl:hide", self.hide_future).aria_label("Hide what has not happened yet"), text("Hide what has not happened yet")])
-                    .gap(tokens::SPACE_2)
-                    .align(Align::Center),
+                row([
+                    switch("tl:hide", self.hide_future).aria_label("Hide what has not happened yet"),
+                    text("Hide what has not happened yet"),
+                ])
+                .gap(tokens::SPACE_2)
+                .align(Align::Center),
             );
         }
         // One height whatever it holds, so the tracks below never shift.
@@ -1556,7 +1559,9 @@ impl Timeline {
     fn bare_strip(&self, f: &Frame) -> El {
         let (title, detail): (&str, &str) = match &self.feed {
             Feed::Asking => ("Statistics", "Asking the server for them…"),
-            Feed::Queued => ("Statistics are queued", "The stats service has not started on this replay yet. They fill in here once it has."),
+            Feed::Queued => {
+                ("Statistics are queued", "The stats service has not started on this replay yet. They fill in here once it has.")
+            }
             Feed::Building | Feed::Complete => ("Working out the numbers", "The first statistics are on their way."),
             Feed::Unavailable(why) => ("No statistics", why),
             Feed::Failed(why) => ("No statistics for this replay", why),
@@ -1676,12 +1681,10 @@ impl Timeline {
     fn lead_gutter(&self) -> El {
         let d = &self.data;
         let at = self.readout_s();
-        let mut lines = vec![row([
-            text("Who is ahead").label(),
-            text(d.lead.label()).caption().muted().ellipsis().width(Size::Fill(1.0)),
-        ])
-        .gap(tokens::SPACE_2)
-        .align(Align::Center)];
+        let mut lines =
+            vec![row([text("Who is ahead").label(), text(d.lead.label()).caption().muted().ellipsis().width(Size::Fill(1.0))])
+                .gap(tokens::SPACE_2)
+                .align(Align::Center)];
         if let Some(why) = self.hidden_reason(at) {
             lines.push(text(why).caption().muted());
         } else {
@@ -1919,11 +1922,12 @@ impl Timeline {
         };
         // The title is the control: it names what the chart shows and opens
         // the list that changes it.
-        let title = select::select_trigger(KEY_METRIC, def.label).aria_expanded(self.metric_open).tooltip(if def.note.is_empty() {
-            format!("The large chart shows: {}. Click to choose another.", def.about)
-        } else {
-            format!("The large chart shows: {}. {} Click to choose another.", def.about, def.note)
-        });
+        let title =
+            select::select_trigger(KEY_METRIC, def.label).aria_expanded(self.metric_open).tooltip(if def.note.is_empty() {
+                format!("The large chart shows: {}. Click to choose another.", def.about)
+            } else {
+                format!("The large chart shows: {}. {} Click to choose another.", def.about, def.note)
+            });
         let mut lines = vec![title, text(when).caption().muted().tabular_numerals().wrap_text()];
         if !visible {
             lines.push(text(self.hidden_reason(at).unwrap_or("Waiting for the first numbers")).muted().wrap_text());
@@ -2018,16 +2022,17 @@ impl Timeline {
         };
         let hot = f.is_hovered(KEY_MORE);
         let tone = if hot { tokens::FOREGROUND } else { tokens::MUTED_FOREGROUND };
-        let gutter = row([icon(glyph).icon_size(tokens::ICON_SM).text_color(tone), text(words).caption().text_color(tone).ellipsis()])
-            .gap(tokens::SPACE_2)
-            .align(Align::Center)
-            .key(KEY_MORE)
-            .focusable()
-            .focus_ring_inside()
-            .role(Role::Button)
-            .aria_expanded(self.rows_open)
-            .cursor(Cursor::Pointer)
-            .radius(tokens::RADIUS_SM);
+        let gutter =
+            row([icon(glyph).icon_size(tokens::ICON_SM).text_color(tone), text(words).caption().text_color(tone).ellipsis()])
+                .gap(tokens::SPACE_2)
+                .align(Align::Center)
+                .key(KEY_MORE)
+                .focusable()
+                .focus_ring_inside()
+                .role(Role::Button)
+                .aria_expanded(self.rows_open)
+                .cursor(Cursor::Pointer)
+                .radius(tokens::RADIUS_SM);
         let gutter = if hot { gutter.fill(chosen_surface()) } else { gutter };
         let area = placed(Some(MORE_H), 0.0, Vec::new()).key(Self::area_key("more")).cursor(Cursor::Pointer);
         self.track_inset(f, MORE_H, Sides { left: tokens::SPACE_2, ..Sides::zero() }, gutter, area)
@@ -2165,7 +2170,10 @@ impl Timeline {
         // Words on a band sit level with the strip, where nothing else is written.
         let words_top = fog_top + self.lanes_height() + LEAD_H / 2.0 - 8.0;
         let words = |from: f32, to: f32, what: &'static str| {
-            (Place::Tag { at: (from + to) / 2.0, w: None, h: 16.0, top: words_top, anchor: Anchor::Center }, text(what).caption().muted())
+            (
+                Place::Tag { at: (from + to) / 2.0, w: None, h: 16.0, top: words_top, anchor: Anchor::Center },
+                text(what).caption().muted(),
+            )
         };
         if g < 1.0 && !self.free {
             if self.hiding() {
@@ -2542,7 +2550,8 @@ impl Timeline {
         let room = (((f.gutter + f.w) - 170.0) / CELL_W).floor().max(1.0) as usize;
         let columns: Vec<usize> = self.rows_when(false).into_iter().take(room).collect();
         let mut header: Vec<El> = vec![text("").width(Size::Fill(1.0))];
-        header.extend(columns.iter().map(|m| text(d.metrics[*m].def.label).caption().muted().end_text().ellipsis().width(cell_w)));
+        header
+            .extend(columns.iter().map(|m| text(d.metrics[*m].def.label).caption().muted().end_text().ellipsis().width(cell_w)));
         let mut rows = vec![row(header).align(Align::Center)];
         if !visible {
             rows.push(text(self.hidden_reason(at).unwrap_or("No numbers here")).muted());
@@ -2574,7 +2583,12 @@ impl Timeline {
                 }
             }
         }
-        collapsible("tl:table", format!("The main numbers at {}", clock(at)), self.table_open, [column(rows).gap(tokens::SPACE_1)])
+        collapsible(
+            "tl:table",
+            format!("The main numbers at {}", clock(at)),
+            self.table_open,
+            [column(rows).gap(tokens::SPACE_1)],
+        )
     }
 }
 
@@ -2605,9 +2619,18 @@ fn hover_ring(at: f32, y: f32, color: Color, r: f32) -> (Place, El) {
 
 /// How wide `words` draw in the caption size, px.
 fn text_width(words: &str, weight: FontWeight) -> f32 {
-    damascene_core::layout_text_with_family(words, tokens::TEXT_XS.size, FontFamily::default(), weight, false, true, TextWrap::NoWrap, None)
-        .measured()
-        .width
+    damascene_core::layout_text_with_family(
+        words,
+        tokens::TEXT_XS.size,
+        FontFamily::default(),
+        weight,
+        false,
+        true,
+        TextWrap::NoWrap,
+        None,
+    )
+    .measured()
+    .width
 }
 
 /// A line of news above the tracks: an alert sign, a title, the detail
@@ -2682,7 +2705,11 @@ fn tug(def: MetricDef, vals: &[(Color, f32)], visible: bool, with_bar: bool) -> 
         }
     };
     let bar = |vals: &[(Color, f32)]| {
-        if visible { share_bar(vals, 6.0) } else { share_bar(&[], 6.0) }.width(Size::Fixed(if with_bar { ROW_BAR_W } else { 0.0 }))
+        if visible { share_bar(vals, 6.0) } else { share_bar(&[], 6.0) }.width(Size::Fixed(if with_bar {
+            ROW_BAR_W
+        } else {
+            0.0
+        }))
     };
     match vals {
         [a, b] => {

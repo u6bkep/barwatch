@@ -118,7 +118,10 @@ pub fn parse_game_id(id: &str) -> Option<String> {
 /// direction and width marks (which can make text read other than it is), bounded
 /// length.
 pub fn clean_words(text: &str) -> String {
-    let odd = |c: char| c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}' | '\u{061c}' | '\u{feff}');
+    let odd = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}' | '\u{061c}' | '\u{feff}')
+    };
     let mut s: String = text.chars().map(|c| if odd(c) { ' ' } else { c }).take(MAX_WORDS).collect();
     if text.chars().count() > MAX_WORDS {
         s.push('…');
@@ -129,12 +132,14 @@ pub fn clean_words(text: &str) -> String {
 fn parse_status(body: &[u8]) -> Result<GameStatus, SvcError> {
     // serde's words can quote the service's text: cleaned and bounded like any of it.
     let raw: RawStatus = serde_json::from_slice(body).map_err(|e| SvcError::Malformed(clean_words(&format!("status: {e}"))))?;
-    let game_id = raw.game_id.as_deref().and_then(parse_game_id).ok_or_else(|| SvcError::Malformed("status has no game id".into()))?;
+    let game_id =
+        raw.game_id.as_deref().and_then(parse_game_id).ok_or_else(|| SvcError::Malformed("status has no game id".into()))?;
     let state = raw
         .state
         .filter(|s| !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
         .ok_or_else(|| SvcError::Malformed("status has no state".into()))?;
-    let frame_of = |v: &Option<serde_json::Value>| v.as_ref().and_then(serde_json::Value::as_u64).map(|f| f.min(u32::MAX as u64) as u32);
+    let frame_of =
+        |v: &Option<serde_json::Value>| v.as_ref().and_then(serde_json::Value::as_u64).map(|f| f.min(u32::MAX as u64) as u32);
     let (frame, of_frames) = match &raw.progress {
         Some(p) => (frame_of(&p.frame).unwrap_or(0), frame_of(&p.of_frames)),
         None => (0, None),
@@ -247,8 +252,7 @@ impl StatsClient {
             query.push(("rev", rev.to_string()));
             query.push(("wait", wait.as_secs().to_string()));
         }
-        let req =
-            self.request(Method::GET, self.url(&format!("api/v1/games/{game_id}"), &query)).timeout(wait + STATUS_GRACE);
+        let req = self.request(Method::GET, self.url(&format!("api/v1/games/{game_id}"), &query)).timeout(wait + STATUS_GRACE);
         let resp = self.send(req).await?;
         parse_status(&read_limited(resp, MAX_JSON).await?)
     }
@@ -334,10 +338,14 @@ mod tests {
         .unwrap();
         assert_eq!(ok.game_id, "ae1b9e6a7c9f738baabdec84229b888f");
         assert_eq!((ok.phase(), ok.frame, ok.of_frames, ok.rev), (SvcPhase::Simulating, 1200, Some(36000), 77));
-        let failed = parse_status(br#"{"game_id":"ae1b9e6a7c9f738baabdec84229b888f","state":"failed","error":"engine\u0007 crashed\nhere"}"#).unwrap();
+        let failed = parse_status(
+            br#"{"game_id":"ae1b9e6a7c9f738baabdec84229b888f","state":"failed","error":"engine\u0007 crashed\nhere"}"#,
+        )
+        .unwrap();
         assert_eq!(failed.phase(), SvcPhase::Failed);
         assert_eq!(failed.error.as_deref(), Some("engine  crashed here"));
-        let odd = parse_status(br#"{"game_id":"ae1b9e6a7c9f738baabdec84229b888f","state":"thinking","progress":{"frame":-5}}"#).unwrap();
+        let odd = parse_status(br#"{"game_id":"ae1b9e6a7c9f738baabdec84229b888f","state":"thinking","progress":{"frame":-5}}"#)
+            .unwrap();
         assert_eq!((odd.phase(), odd.frame), (SvcPhase::Queued, 0));
         for bad in [
             &br#"{"state":"simulating"}"#[..],

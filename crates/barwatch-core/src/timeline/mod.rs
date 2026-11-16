@@ -334,7 +334,12 @@ impl TimelineBuilder {
             marks: self
                 .marks
                 .iter()
-                .map(|m| Mark { frame: m.frame, team: self.teams[m.team].team, kind: m.kind.key().to_owned(), def: m.def.clone() })
+                .map(|m| Mark {
+                    frame: m.frame,
+                    team: self.teams[m.team].team,
+                    kind: m.kind.key().to_owned(),
+                    def: m.def.clone(),
+                })
                 .collect(),
         }
     }

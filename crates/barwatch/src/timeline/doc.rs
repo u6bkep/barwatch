@@ -89,7 +89,12 @@ impl Reader<'_> {
         for team in 0..self.teams {
             let mut values: Vec<f32> = stored
                 .get(team)
-                .map(|v| v.iter().take(self.n).map(|x| if x.is_finite() { x.clamp(-MAX_VALUE, MAX_VALUE) as f32 } else { 0.0 }).collect())
+                .map(|v| {
+                    v.iter()
+                        .take(self.n)
+                        .map(|x| if x.is_finite() { x.clamp(-MAX_VALUE, MAX_VALUE) as f32 } else { 0.0 })
+                        .collect()
+                })
                 .unwrap_or_default();
             let fill = match kind {
                 MetricKind::Cumulative => values.last().copied().unwrap_or(0.0),
@@ -125,9 +130,7 @@ impl Reader<'_> {
     fn values(&self, def: &MetricDef, period_s: f32) -> Option<Vec<Vec<f32>>> {
         let mut values = match recipe(def) {
             Recipe::Direct(kind) => self.series(def.id, kind)?,
-            Recipe::LevelOrRate(of) => {
-                self.series(def.id, MetricKind::Level).or_else(|| self.rate(of, 1, 1.0, period_s))?
-            }
+            Recipe::LevelOrRate(of) => self.series(def.id, MetricKind::Level).or_else(|| self.rate(of, 1, 1.0, period_s))?,
             Recipe::Rate { of, window, per } => self.rate(of, window, per, period_s)?,
             Recipe::UnitsAlive => {
                 let read = |keys: [&str; 3]| -> Option<Vec<Vec<Vec<f32>>>> {
@@ -380,7 +383,18 @@ mod tests {
         assert_eq!(data.n, 40, "the slot at 18000 is not whole until a later frame is named");
         assert_eq!(
             ids(&data),
-            ["metalStored", "energyStored", "valueArmy", "unitValue", "valueDefense", "valueEconomy", "valueUtility", "buildPowerUse", "buildPower", "actionsPerMinute"]
+            [
+                "metalStored",
+                "energyStored",
+                "valueArmy",
+                "unitValue",
+                "valueDefense",
+                "valueEconomy",
+                "valueUtility",
+                "buildPowerUse",
+                "buildPower",
+                "actionsPerMinute"
+            ]
         );
         assert_eq!(data.lead, data::Lead::ArmyValue);
         // Marks past what is simulated are not there yet.

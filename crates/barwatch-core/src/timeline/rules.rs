@@ -245,9 +245,11 @@ impl DefFacts {
             }
             Milestone::Air => self.bucket()? == Bucket::Air,
             Milestone::Naval => self.bucket()? == Bucket::Sea,
-            Milestone::CommanderLost | Milestone::FirstKill | Milestone::FirstLoss | Milestone::CommanderKill | Milestone::TeamDied => {
-                false
-            }
+            Milestone::CommanderLost
+            | Milestone::FirstKill
+            | Milestone::FirstLoss
+            | Milestone::CommanderKill
+            | Milestone::TeamDied => false,
         })
     }
 

@@ -127,9 +127,7 @@ fn read_output(path: &std::path::Path) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut raw = Vec::new();
     if path.extension().is_some_and(|e| e == "zst") {
-        ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(file))
-            .context("not zstd")?
-            .read_to_end(&mut raw)?;
+        ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(file)).context("not zstd")?.read_to_end(&mut raw)?;
     } else {
         std::io::BufReader::new(file).read_to_end(&mut raw)?;
     }

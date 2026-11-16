@@ -152,7 +152,13 @@ impl Archive {
             .take(u64::from(entry.size) + 1)
             .read_to_end(&mut out)
             .with_context(|| format!("{name}: decompressing {}", path.display()))?;
-        ensure!(out.len() == entry.size as usize, "{name}: {} holds {} bytes, the index says {}", path.display(), out.len(), entry.size);
+        ensure!(
+            out.len() == entry.size as usize,
+            "{name}: {} holds {} bytes, the index says {}",
+            path.display(),
+            out.len(),
+            entry.size
+        );
         ensure!(crc32fast::hash(&out) == entry.crc32, "{name}: {} does not match the index's checksum", path.display());
         Ok(Some(out))
     }

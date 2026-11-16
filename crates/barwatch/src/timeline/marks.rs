@@ -349,7 +349,11 @@ pub fn cluster(markers: &[Marker], indices: &[usize], min_gap_s: f32) -> Vec<Clu
             .members
             .iter()
             .max_by(|a, b| {
-                markers[**a].kind.importance().total_cmp(&markers[**b].kind.importance()).then(markers[**b].t.total_cmp(&markers[**a].t))
+                markers[**a]
+                    .kind
+                    .importance()
+                    .total_cmp(&markers[**b].kind.importance())
+                    .then(markers[**b].t.total_cmp(&markers[**a].t))
             })
             .unwrap();
         c.members.retain(|m| *m != lead);

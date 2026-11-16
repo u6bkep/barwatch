@@ -78,11 +78,7 @@ pub async fn fetch(http: &reqwest::Client, archive: &Archive, input: &str, max_b
 /// Gets the replay through the stats service's mirror (DESIGN §4.2): `id` is a
 /// replay id from [`replay_id`]. The file must carry that game id in its header;
 /// the caller validates the rest as it does any replay.
-pub async fn through_service(
-    client: &crate::stats_client::StatsClient,
-    id: &str,
-    max_bytes: usize,
-) -> Result<(String, Vec<u8>)> {
+pub async fn through_service(client: &crate::stats_client::StatsClient, id: &str, max_bytes: usize) -> Result<(String, Vec<u8>)> {
     let id = id.to_ascii_lowercase();
     let (name, body) = client.replay(&id, max_bytes).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     let found = barwatch_core::demo::game_id_from_gz(&body);

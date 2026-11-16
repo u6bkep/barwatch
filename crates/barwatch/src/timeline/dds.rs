@@ -82,13 +82,7 @@ fn expand(v: u32, n: u32) -> u8 {
 }
 
 /// Decode 4x4 blocks of `block_size` bytes; `f` fills the block's 16 pixels (row-major).
-fn blocks(
-    body: &[u8],
-    width: u32,
-    height: u32,
-    block_size: usize,
-    f: impl Fn(&[u8], &mut [[u8; 4]; 16]),
-) -> Result<RgbaImage> {
+fn blocks(body: &[u8], width: u32, height: u32, block_size: usize, f: impl Fn(&[u8], &mut [[u8; 4]; 16])) -> Result<RgbaImage> {
     let (bw, bh) = (width.div_ceil(4), height.div_ceil(4));
     ensure!(body.len() >= (bw * bh) as usize * block_size, "truncated DDS");
     let mut img = RgbaImage::new(width, height);
@@ -204,4 +198,3 @@ mod tests {
         assert_eq!(img.get_pixel(2, 0).0[3], 218);
     }
 }
-

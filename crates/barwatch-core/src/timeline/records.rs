@@ -18,18 +18,54 @@ const MAX_NAME: usize = 128;
 
 pub(super) enum Record {
     /// The stream's control line: where to resume and whether it is over.
-    Cursor { frame: Option<u32>, complete: bool },
+    Cursor {
+        frame: Option<u32>,
+        complete: bool,
+    },
     /// Per-team values at one moment, from one of the three sampled record types.
-    Sample { frame: u32, team: u32, values: Vec<(Metric, f64)> },
-    UnitDef { def: u32, name: Option<String>, facts: GexDef },
-    BsUnitDef { def: u32, name: Option<String>, facts: BsDef },
-    UnitCreated { frame: u32, unit: u32, team: u32, def: u32 },
-    UnitFinished { frame: u32, unit: u32, team: u32 },
-    UnitKilled { frame: u32, unit: u32, team: u32, def: Option<u32>, def_name: Option<String>, attacker_team: Option<u32> },
-    TeamDied { frame: u32, team: u32 },
+    Sample {
+        frame: u32,
+        team: u32,
+        values: Vec<(Metric, f64)>,
+    },
+    UnitDef {
+        def: u32,
+        name: Option<String>,
+        facts: GexDef,
+    },
+    BsUnitDef {
+        def: u32,
+        name: Option<String>,
+        facts: BsDef,
+    },
+    UnitCreated {
+        frame: u32,
+        unit: u32,
+        team: u32,
+        def: u32,
+    },
+    UnitFinished {
+        frame: u32,
+        unit: u32,
+        team: u32,
+    },
+    UnitKilled {
+        frame: u32,
+        unit: u32,
+        team: u32,
+        def: Option<u32>,
+        def_name: Option<String>,
+        attacker_team: Option<u32>,
+    },
+    TeamDied {
+        frame: u32,
+        team: u32,
+    },
     /// A record type the timeline does not use; its frame still says how far the
     /// simulation has got.
-    Other { frame: Option<u32> },
+    Other {
+        frame: Option<u32>,
+    },
 }
 
 /// Reads one parsed line. `None`: not a record, or a record the timeline uses
@@ -51,12 +87,9 @@ pub(super) fn read(v: &Value) -> Option<Record> {
         "bs_team_resources" => sample(o, frame?, Source::BsTeamResources)?,
         "unit_def" => Record::UnitDef { def: int(o, "defID")?, name: name(o, "defName"), facts: gex_def(o) },
         "bs_unit_def" => Record::BsUnitDef { def: int(o, "defID")?, name: name(o, "defName"), facts: bs_def(o) },
-        "unit_created" => Record::UnitCreated {
-            frame: frame?,
-            unit: int(o, "unitID")?,
-            team: int(o, "teamID")?,
-            def: int(o, "defID")?,
-        },
+        "unit_created" => {
+            Record::UnitCreated { frame: frame?, unit: int(o, "unitID")?, team: int(o, "teamID")?, def: int(o, "defID")? }
+        }
         "unit_finished" => Record::UnitFinished { frame: frame?, unit: int(o, "unitID")?, team: int(o, "teamID")? },
         "unit_killed" => Record::UnitKilled {
             frame: frame?,

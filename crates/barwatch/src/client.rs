@@ -626,12 +626,7 @@ enum Answer {
 /// Long-polls the party's statistics and hands on every change, until `deliver`
 /// says nobody listens any more. The server's bytes are taken for no more than
 /// what the types make of them, and no more than `max_bytes` of them are read.
-async fn follow_timeline(
-    http: reqwest::Client,
-    url: Url,
-    poll: TimelinePoll,
-    deliver: impl Fn(Arc<TimelineView>) -> bool,
-) {
+async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, deliver: impl Fn(Arc<TimelineView>) -> bool) {
     // The `rev` of the view delivered last; the server's own count, which starts
     // over when the server does.
     let mut rev: Option<u64> = None;
@@ -850,7 +845,10 @@ mod tests {
             View(TimelineView),
             Status(u16),
             /// A body this long, said up front or sent in chunks without saying.
-            Huge { len: usize, chunked: bool },
+            Huge {
+                len: usize,
+                chunked: bool,
+            },
             /// A JSON body as it is.
             Raw(&'static str),
         }
@@ -896,13 +894,15 @@ mod tests {
                             r
                         }
                         Reply::Raw(body) => {
-                            format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).into_bytes()
+                            format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                                .into_bytes()
                         }
                         Reply::Status(code) => {
                             format!("HTTP/1.1 {code} Nope\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").into_bytes()
                         }
                         Reply::Huge { len, chunked: false } => {
-                            let mut r = format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n").into_bytes();
+                            let mut r =
+                                format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n").into_bytes();
                             r.extend(std::iter::repeat_n(b' ', len));
                             r
                         }
@@ -972,8 +972,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_server_without_the_call_is_told_once_and_asked_rarely() {
-            let (url, asked) =
-                serve(vec![Reply::Status(404), Reply::Status(404), view(5, TimelineState::Complete)]).await;
+            let (url, asked) = serve(vec![Reply::Status(404), Reply::Status(404), view(5, TimelineState::Complete)]).await;
             let got = follow_for(url, POLL, 2).await;
             assert_eq!(got.len(), 2);
             assert_eq!(got[0].state, TimelineState::Unavailable);

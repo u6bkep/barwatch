@@ -196,7 +196,8 @@ impl StatsHistory {
         for t in 0..num_teams {
             let count = usize::try_from(i32::from_le_bytes(block[t * 4..t * 4 + 4].try_into().unwrap()))
                 .context("negative record count")?;
-            let bytes = count.checked_mul(RECORD_SIZE).filter(|&n| at + n <= block.len()).context("statistics block truncated")?;
+            let bytes =
+                count.checked_mul(RECORD_SIZE).filter(|&n| at + n <= block.len()).context("statistics block truncated")?;
             teams.push(block[at..at + bytes].chunks_exact(RECORD_SIZE).map(TeamSample::parse).collect());
             at += bytes;
         }

@@ -2,14 +2,7 @@ use super::*;
 use serde_json::{json, Value};
 
 fn team(team: u32, ally: u32) -> TeamEntry {
-    TeamEntry {
-        team,
-        ally,
-        name: format!("p{team}"),
-        is_ai: false,
-        side: Some("armada".into()),
-        color: Some("#102030".into()),
-    }
+    TeamEntry { team, ally, name: format!("p{team}"), is_ai: false, side: Some("armada".into()), color: Some("#102030".into()) }
 }
 
 /// Teams 0 and 2 are allies; team 1 is the enemy.
@@ -564,8 +557,7 @@ fn bad_lines_are_skipped_and_good_ones_still_count() {
         // A name too long is left out; the definition still counts.
         format!(r#"{{"action":"unit_def","frame":0,"defID":1,"defName":"{}"}}"#, "x".repeat(1000)),
         // NaN as Gex writes it: the field is left out, the rest kept.
-        r#"{"action":"extra_stat_update","frame":450,"teamID":0,"totalValue":"NaN","armyValue":"Infinity","defValue":3}"#
-            .into(),
+        r#"{"action":"extra_stat_update","frame":450,"teamID":0,"totalValue":"NaN","armyValue":"Infinity","defValue":3}"#.into(),
         // A team the replay does not name.
         line(json!({"action": "extra_stat_update", "frame": 900, "teamID": 42, "totalValue": 1})),
     ]);

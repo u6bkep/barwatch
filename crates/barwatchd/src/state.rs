@@ -139,13 +139,8 @@ impl App {
         let dir = self.cfg.data.join("sessions").join(&id);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("replay.sdfz"), bytes)?;
-        let meta = Meta {
-            id: id.clone(),
-            created_unix: unix_now(),
-            replay,
-            game_id: None,
-            bar_replay: bar_replay.map(str::to_owned),
-        };
+        let meta =
+            Meta { id: id.clone(), created_unix: unix_now(), replay, game_id: None, bar_replay: bar_replay.map(str::to_owned) };
         std::fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
         let header_game_id = barwatch_core::demo::game_id_from_gz(bytes);
         let session = Arc::new(Session::new(meta, dir, demo, header_game_id, Phase::Preparing));

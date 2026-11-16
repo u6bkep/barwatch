@@ -1119,14 +1119,21 @@ fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
         }
         (timeline::Feed::Unavailable(why) | timeline::Feed::Failed(why), _) => format!("Statistics: none. {why}"),
         (timeline::Feed::Complete, None) => "Statistics: none. The server sent none.".to_owned(),
-        (timeline::Feed::Complete, Some(_)) => "Statistics: ready. A timeline of the game shows here once you are in it.".to_owned(),
+        (timeline::Feed::Complete, Some(_)) => {
+            "Statistics: ready. A timeline of the game shows here once you are in it.".to_owned()
+        }
         (timeline::Feed::Building, Some(doc)) => format!("Statistics: {} so far.", so_far(doc)),
         (timeline::Feed::Building, None) => "Statistics: being worked out.".to_owned(),
-        (timeline::Feed::Queued | timeline::Feed::Asking, _) => "Statistics: the stats service has this replay in its queue.".to_owned(),
+        (timeline::Feed::Queued | timeline::Feed::Asking, _) => {
+            "Statistics: the stats service has this replay in its queue.".to_owned()
+        }
     };
-    row([icon("chart-line").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND), text(words).caption().muted().wrap_text().width(Size::Fill(1.0))])
-        .gap(tokens::SPACE_2)
-        .align(Align::Center)
+    row([
+        icon("chart-line").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND),
+        text(words).caption().muted().wrap_text().width(Size::Fill(1.0)),
+    ])
+    .gap(tokens::SPACE_2)
+    .align(Align::Center)
 }
 
 /// Where this viewer stands, in words.

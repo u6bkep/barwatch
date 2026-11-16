@@ -176,7 +176,9 @@ async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> 
         };
         let (name, bytes) = match via_service {
             Some(got) => got,
-            None => source::fetch(&app.http, &app.cfg.archive, id, app.cfg.max_upload).await.map_err(|e| ApiErr::bad(format!("{e:#}")))?,
+            None => source::fetch(&app.http, &app.cfg.archive, id, app.cfg.max_upload)
+                .await
+                .map_err(|e| ApiErr::bad(format!("{e:#}")))?,
         };
         (name, Bytes::from(bytes), Some(id.to_ascii_lowercase()))
     } else {

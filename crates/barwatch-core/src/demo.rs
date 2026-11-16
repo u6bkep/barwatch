@@ -402,7 +402,8 @@ hostip=1.2.3.4;\nhostport=8452;\nishost=1;\nmyplayername=Host;\ngametype=Some Ga
         };
         let mut raw = fake_demo_bytes();
         assert_eq!(game_id_from_gz(&gz(&raw)), None, "all zeros is no id");
-        raw[280..296].copy_from_slice(&[0xcc, 0x40, 0xf9, 0x6a, 0x27, 0x93, 0x76, 0x5a, 0x13, 0xa5, 0x82, 0xda, 0x36, 0x64, 0x28, 0x40]);
+        raw[280..296]
+            .copy_from_slice(&[0xcc, 0x40, 0xf9, 0x6a, 0x27, 0x93, 0x76, 0x5a, 0x13, 0xa5, 0x82, 0xda, 0x36, 0x64, 0x28, 0x40]);
         assert_eq!(game_id_from_gz(&gz(&raw)).as_deref(), Some("cc40f96a2793765a13a582da36642840"));
         assert_eq!(game_id_from_gz(&gz(&raw[..200])), None);
         assert_eq!(game_id_from_gz(b"not gzip"), None);

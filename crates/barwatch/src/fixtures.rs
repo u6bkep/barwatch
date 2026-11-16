@@ -8,9 +8,7 @@ use crate::datadir::DataDir;
 use crate::position::{Position, Report};
 use crate::replays::LocalReplay;
 use crate::ui::Ui;
-use barwatch_core::api::{
-    JumpView, Link, Phase, ReplayInfo, SessionView, TimelineState, TimelineView, ViewerState, ViewerView,
-};
+use barwatch_core::api::{JumpView, Link, Phase, ReplayInfo, SessionView, TimelineState, TimelineView, ViewerState, ViewerView};
 use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,7 +86,8 @@ pub mod docs {
     /// the companion's income and storage levels, and the engine's own
     /// counters only once the simulation is over.
     pub fn older_service(doc: &TimelineDoc) -> TimelineDoc {
-        const COMPANION: [&str; 6] = ["metalIncome", "metalExpense", "metalLevel", "energyIncome", "energyExpense", "energyLevel"];
+        const COMPANION: [&str; 6] =
+            ["metalIncome", "metalExpense", "metalLevel", "energyIncome", "energyExpense", "energyLevel"];
         const AT_THE_END: [&str; 19] = [
             "metalProduced",
             "metalUsed",
