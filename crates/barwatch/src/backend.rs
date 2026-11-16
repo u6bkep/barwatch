@@ -53,6 +53,7 @@ pub type WakeSlot = Arc<Mutex<Option<Wakeup>>>;
 pub struct Backend {
     commands: async_mpsc::UnboundedSender<Cmd>,
     messages: mpsc::Receiver<Msg>,
+    wake: WakeSlot,
 }
 
 /// Posts messages to the window and wakes it.
@@ -75,7 +76,7 @@ impl Backend {
     pub fn spawn(wake: WakeSlot) -> (Backend, Outbox) {
         let (commands, command_rx) = async_mpsc::unbounded_channel();
         let (message_tx, messages) = mpsc::channel();
-        let outbox = Outbox { messages: message_tx, wake };
+        let outbox = Outbox { messages: message_tx, wake: wake.clone() };
         let to_window = outbox.clone();
         std::thread::Builder::new()
             .name("barwatch-backend".into())
@@ -85,12 +86,23 @@ impl Backend {
                 runtime.block_on(work(command_rx, outbox));
             })
             .expect("backend thread");
-        (Backend { commands, messages }, to_window)
+        (Backend { commands, messages, wake }, to_window)
     }
 
     /// A backend that does nothing, for rendering fixed scenes.
     pub fn inert() -> Backend {
-        Backend { commands: async_mpsc::unbounded_channel().0, messages: mpsc::channel().1 }
+        Backend { commands: async_mpsc::unbounded_channel().0, messages: mpsc::channel().1, wake: WakeSlot::default() }
+    }
+
+    /// Asks the window for a frame, from any thread: for work done off the
+    /// backend whose result the window picks up when it next draws.
+    pub fn waker(&self) -> impl FnOnce() + Send + 'static {
+        let wake = self.wake.clone();
+        move || {
+            if let Some(wakeup) = wake.lock().unwrap().as_ref() {
+                wakeup.wake();
+            }
+        }
     }
 
     pub fn send(&self, cmd: Cmd) {

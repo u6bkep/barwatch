@@ -79,6 +79,10 @@ enum Cmd {
     },
 }
 
+/// The window's size when it opens, in logical px: room for the timeline of
+/// a two-sided game with its main rows, beside the game on a second monitor.
+pub const WINDOW: (f32, f32) = (1180.0, 900.0);
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = config::Config::load();
@@ -118,7 +122,7 @@ fn main() -> Result<()> {
 /// Opens the window, on `link` if one was given (that is how a browser starts us).
 fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>) -> Result<()> {
     use damascene_core::prelude::Rect;
-    let viewport = Rect::new(0.0, 0.0, 980.0, 700.0);
+    let viewport = Rect::new(0.0, 0.0, WINDOW.0, WINDOW.1);
     // A canned scene, for screenshots and layout review.
     if let Ok(scene) = std::env::var("BARWATCH_FIXTURE") {
         let ui = fixtures::scene(&scene)

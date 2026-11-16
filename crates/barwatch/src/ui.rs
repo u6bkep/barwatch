@@ -5,13 +5,15 @@ use crate::client::{self, Stage};
 use crate::config::Config;
 use crate::datadir::{self, DataDir};
 use crate::replays::LocalReplay;
+use crate::timeline::{self, icons, Icons, Timeline};
 use crate::uri;
-use barwatch_core::api::{self, Link, Phase, ReplayInfo, SessionView, ViewerState};
+use barwatch_core::api::{self, JumpView, Link, Phase, ReplayInfo, SessionView, TimelineView, ViewerState};
 use damascene_core::prelude::*;
 use damascene_core::widgets::{tabs, text_input};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use url::Url;
 
 const TAB_PARTY: &str = "party";
@@ -20,6 +22,10 @@ const TAB_SETTINGS: &str = "settings";
 const REPLAY_ROW_HEIGHT: f32 = 52.0;
 const CHAT_HINT: &str = "In game chat: !skip 14:00   !skip +2m   !pause   !resume   !speed 2";
 
+/// How often the window is drawn while the game line moves: the clock on it
+/// counts seconds, and the line creeps a pixel in about as long.
+const GAME_LINE_FRAME: Duration = Duration::from_millis(250);
+
 /// The party this app is in (or was, until the user dismisses it).
 struct Party {
     server: Url,
@@ -27,6 +33,166 @@ struct Party {
     update: Option<client::Update>,
     /// The client has stopped: left, failed, or the party is gone.
     over: bool,
+    /// The statistics timeline, from the first time this viewer is in game.
+    watch: Option<Watch>,
+    art: Art,
+}
+
+/// The timeline of the game this viewer is watching (DESIGN.md §5.7). It is
+/// kept for the whole party, so that what the viewer chose to look at stays
+/// when the replay is started again; it is on screen while this viewer is in
+/// the game, and after the game has ended for those who were.
+struct Watch {
+    timeline: Timeline,
+    /// The run of the party this viewer was last in the game of.
+    run: u32,
+    /// This viewer's engine was in the running game at the last update.
+    in_game: bool,
+    /// The statistics the timeline was given last, as the client handed them over.
+    applied: Option<Arc<TimelineView>>,
+    /// The jump the server named last. One that differs from it is new and
+    /// under way; the one already named when this viewer got into the game is
+    /// not (the engine is catching up to the party, not to that jump).
+    jump_seen: Option<JumpView>,
+}
+
+/// Marker pictures and unit names from the installed game (DESIGN.md §5.6).
+#[derive(Default)]
+struct Art {
+    loading: Option<icons::Loading>,
+    /// Picture names asked for so far: each is read once.
+    asked: HashSet<String>,
+    /// The game was asked at all (for its unit names, when no marker has a picture).
+    started: bool,
+    /// The statistics whose markers were looked through last: only new ones can
+    /// name new pictures.
+    looked_at: Option<Arc<TimelineView>>,
+    icons: Icons,
+}
+
+impl Party {
+    fn new(server: Url, session: String) -> Party {
+        Party { server, session, update: None, over: false, watch: None, art: Art::default() }
+    }
+
+    /// Whether this viewer's engine is in the running game: open, and started
+    /// for this run (one left open after the last run ended is not).
+    fn in_game(&self) -> bool {
+        self.update.as_ref().is_some_and(|u| {
+            u.stage == Stage::Playing
+                && u.session.as_ref().is_some_and(|s| s.phase == Phase::Running && u.engine_run == Some(s.run))
+        })
+    }
+
+    /// The timeline, while it is on screen: this viewer is in the game, or
+    /// was when it ended (the whole game is then there to look back over; a
+    /// viewer who was not in it may still want to watch it unspoiled).
+    fn watching(&self) -> Option<&Watch> {
+        let session = self.update.as_ref()?.session.as_ref()?;
+        self.watch.as_ref().filter(|w| w.run == session.run && (self.in_game() || session.ended))
+    }
+
+    /// Takes in what an update says for the timeline: a new run, new
+    /// statistics, a jump.
+    fn sync_watch(&mut self) {
+        let in_game = self.in_game();
+        let Some(update) = &self.update else { return };
+        let Some(session) = &update.session else { return };
+        if in_game && self.watch.is_none() {
+            self.watch = Some(Watch {
+                timeline: Timeline::waiting(replay_length(session) as f32),
+                run: session.run,
+                in_game: false,
+                applied: None,
+                jump_seen: None,
+            });
+        }
+        let Some(watch) = &mut self.watch else { return };
+        // This viewer's engine has just got into a game: a new run, or the
+        // same one again. Either way it starts from the beginning.
+        if in_game && (!watch.in_game || watch.run != session.run) {
+            watch.timeline.restart();
+            watch.run = session.run;
+            watch.jump_seen = session.jump;
+        }
+        watch.in_game = in_game;
+        if let Some(view) = &update.timeline {
+            if !watch.applied.as_ref().is_some_and(|applied| Arc::ptr_eq(applied, view)) {
+                let (feed, data) = timeline::statistics(view, replay_length(session));
+                watch.timeline.set_statistics(feed, data);
+                watch.applied = Some(view.clone());
+            }
+        }
+        if watch.run == session.run && session.jump != watch.jump_seen {
+            watch.jump_seen = session.jump;
+            if let (Some(jump), true) = (session.jump, in_game) {
+                watch.timeline.show_jump(jump.target_s as f32);
+            }
+        }
+        if update.jump_refused {
+            watch.timeline.cancel_jump();
+        }
+    }
+
+    /// Before every frame: where the game is now.
+    fn tick_watch(&mut self) {
+        let in_game = self.in_game();
+        let (Some(update), Some(watch)) = (&self.update, &mut self.watch) else { return };
+        let Some(session) = update.session.as_ref().filter(|s| s.run == watch.run) else { return };
+        if session.ended {
+            // The replay has played to its end, wherever the last frame fell.
+            watch.timeline.set_game(f32::MAX);
+        } else if let Some(seconds) = update.position.and_then(|p| p.seconds_at(Instant::now())) {
+            watch.timeline.set_game(seconds as f32);
+        } else if in_game {
+            watch.timeline.set_game_silent();
+        }
+    }
+
+    /// Whether the game line is moving by itself right now, between reports.
+    fn game_line_moves(&self) -> bool {
+        let Some(update) = &self.update else { return false };
+        let running = update.position.is_some_and(|p| !p.report.paused && p.report.speed > 0.0 && p.is_fresh(Instant::now()));
+        running && !update.session.as_ref().is_some_and(|s| s.ended)
+    }
+
+    /// Before every frame: marker pictures and unit names, read from the
+    /// installed game once it is there, and again when new markers name
+    /// units not asked for yet.
+    fn tick_art(&mut self, data: &DataDir, wake: impl FnOnce() + Send + 'static) {
+        let (Some(update), Some(watch)) = (&self.update, &mut self.watch) else { return };
+        if let Some(result) = self.art.loading.as_ref().and_then(icons::Loading::poll) {
+            self.art.loading = None;
+            match result {
+                Ok(art) => {
+                    eprintln!("barwatch: {}", art.summary());
+                    self.art.icons.merge(art.icons);
+                    watch.timeline.set_icons(self.art.icons.clone());
+                    watch.timeline.set_unit_names(art.names);
+                }
+                Err(e) => eprintln!("barwatch: no marker pictures from the installed game ({e:#}); markers use glyphs"),
+            }
+        }
+        let installed = matches!(update.stage, Stage::Ready | Stage::Playing | Stage::Closed);
+        let Some(session) = update.session.as_ref().filter(|_| installed && self.art.loading.is_none()) else { return };
+        let same = |a: &Option<Arc<TimelineView>>, b: &Option<Arc<TimelineView>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if self.art.started && same(&self.art.looked_at, &watch.applied) {
+            return;
+        }
+        self.art.looked_at = watch.applied.clone();
+        let wanted: Vec<String> =
+            watch.timeline.data.marker_pictures().into_iter().filter(|name| !self.art.asked.contains(name)).collect();
+        if wanted.is_empty() && self.art.started {
+            return;
+        }
+        self.art.started = true;
+        self.art.asked.extend(wanted.iter().cloned());
+        self.art.loading = Some(icons::Loading::start(data.root.clone(), session.replay.game.clone(), wanted, wake));
+    }
 }
 
 pub struct Ui {
@@ -123,7 +289,7 @@ impl Ui {
     fn join(&mut self, server: Url, session: String) {
         let settings = client::Settings { name: self.name.clone(), data: self.data.clone(), headless: false };
         self.backend.send(Cmd::Join { server: server.clone(), session: session.clone(), settings });
-        self.party = Some(Party { server, session, update: None, over: false });
+        self.party = Some(Party::new(server, session));
         self.tab = TAB_PARTY.into();
         self.link.clear();
     }
@@ -174,6 +340,7 @@ impl Ui {
                 }
                 if let Some(party) = &mut self.party {
                     party.update = Some(*update);
+                    party.sync_watch();
                 }
             }
             Msg::SessionEnded => {
@@ -251,7 +418,38 @@ impl Ui {
 
     pub fn fixture_party(&mut self, server: Url, update: client::Update) {
         let session = update.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-        self.party = Some(Party { server, session, update: Some(update), over: false });
+        self.party = Some(Party::new(server, session));
+        self.fixture_update(update);
+    }
+
+    /// The next thing the party's client says, as the window takes it in.
+    pub fn fixture_update(&mut self, update: client::Update) {
+        self.apply(Msg::Session(Box::new(update)));
+        self.toasts.clear();
+        if let Some(party) = &mut self.party {
+            party.tick_watch();
+        }
+    }
+
+    /// The party's timeline, once this viewer has been in game.
+    pub fn fixture_timeline(&mut self) -> Option<&mut Timeline> {
+        self.party.as_mut()?.watch.as_mut().map(|w| &mut w.timeline)
+    }
+
+    /// DEVELOPMENT: waits for the marker pictures of the installed game, for a
+    /// one-frame render that has no later frame to show them in.
+    pub fn fixture_wait_for_art(&mut self, timeout: Duration) {
+        let Some(party) = &mut self.party else { return };
+        party.tick_art(&self.data, || {});
+        if let Some(loading) = party.art.loading.take() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(loading.wait(timeout));
+            // Handed back as a finished load, for `tick_art` to take in.
+            if let Ok(Some(result)) = rx.recv() {
+                party.art.loading = Some(icons::Loading::ready(result));
+            }
+        }
+        party.tick_art(&self.data, || {});
     }
 
     pub fn fixture_replays(&mut self, replays: Vec<LocalReplay>, selected: Option<usize>) {
@@ -303,14 +501,20 @@ impl App for Ui {
         for msg in self.backend.drain() {
             self.apply(msg);
         }
+        if let Some(party) = &mut self.party {
+            party.tick_watch();
+            party.tick_art(&self.data, self.backend.waker());
+        }
     }
 
-    fn build(&self, _cx: &BuildCx) -> El {
+    fn build(&self, cx: &BuildCx) -> El {
         let body = match self.tab.as_str() {
             TAB_REPLAYS => self.replays_view(),
             TAB_SETTINGS => self.settings_view(),
-            _ => self.party_view(),
+            _ => self.party_view(cx),
         };
+        // The timeline's open list hangs from the timeline: only while that is drawn.
+        let layers = self.watching().map(|w| w.timeline.layers()).unwrap_or_default();
         overlays(
             page([
                 tabs_list(
@@ -321,8 +525,12 @@ impl App for Ui {
                 body,
             ])
             .gap(tokens::SPACE_4),
-            [self.pending.as_ref().map(consent_dialog)],
+            layers.into_iter().map(Some).chain([self.pending.as_ref().map(consent_dialog)]),
         )
+    }
+
+    fn shaders(&self) -> Vec<AppShader> {
+        timeline::shaders()
     }
 
     fn selection(&self) -> Selection {
@@ -334,10 +542,12 @@ impl App for Ui {
     }
 
     fn drain_focus_requests(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.focus_requests)
+        let mut requests = std::mem::take(&mut self.focus_requests);
+        requests.extend(self.watching_mut().and_then(|w| w.timeline.take_focus_request()));
+        requests
     }
 
-    fn on_event(&mut self, event: UiEvent, _cx: &EventCx) {
+    fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
         if event.kind == UiEventKind::SelectionChanged {
             if let Some(sel) = event.selection.as_ref() {
                 self.selection = sel.clone();
@@ -362,6 +572,13 @@ impl App for Ui {
         if declines_consent(&event) {
             self.pending = None;
             return;
+        }
+
+        // The timeline: everything under its own keys, and Escape at the window.
+        if let Some(watch) = self.watching_mut() {
+            if let Some(timeline::Action::Jump(seconds)) = watch.timeline.on_event(&event, cx) {
+                self.backend.send(Cmd::Session(client::Command::Jump(seconds.round().max(0.0) as u32)));
+            }
         }
 
         // Watch party.
@@ -432,10 +649,16 @@ impl App for Ui {
     }
 }
 
-/// The window host's own hooks. The party view has nothing that follows the
-/// pointer yet, so the pointer hook stays the default no-op; the timeline will
-/// take it when it is embedded here (DESIGN.md §5.7).
-impl barwatch_host::WinitWgpuApp for Ui {}
+/// The window host's own hooks: the timeline follows the pointer (its hover
+/// line and readout), so it gets every pointer move while it is on screen.
+impl barwatch_host::WinitWgpuApp for Ui {
+    fn pointer_moved(&mut self, position: Option<(f32, f32)>, cx: &EventCx) -> bool {
+        match self.watching_mut() {
+            Some(watch) => watch.timeline.pointer_moved(position, cx),
+            None => false,
+        }
+    }
+}
 
 /// A focused text field receives Tab as a raw key instead of giving up focus, so
 /// the fields hand focus to their neighbours here: (field, previous, next).
@@ -495,6 +718,17 @@ fn consent_dialog(link: &Link) -> El {
 }
 
 impl Ui {
+    /// The timeline, while it is on screen: in the party view, with no dialog over it.
+    fn watching(&self) -> Option<&Watch> {
+        let shown = self.tab == TAB_PARTY && self.pending.is_none();
+        self.party.as_ref().filter(|_| shown)?.watching()
+    }
+
+    fn watching_mut(&mut self) -> Option<&mut Watch> {
+        self.watching()?;
+        self.party.as_mut()?.watch.as_mut()
+    }
+
     fn picture(&self, map: &str, side: f32) -> El {
         let frame = |el: El| el.width(Size::Fixed(side)).height(Size::Fixed(side)).radius(tokens::RADIUS_MD);
         match self.pictures.get(map) {
@@ -534,7 +768,7 @@ impl Ui {
             .align(Align::Start)
     }
 
-    fn party_view(&self) -> El {
+    fn party_view(&self, cx: &BuildCx) -> El {
         let Some(party) = &self.party else {
             return column([
                 card([
@@ -564,33 +798,63 @@ impl Ui {
                 .align(Align::Center);
         };
         let mut sections: Vec<El> = Vec::new();
-        if let Some(session) = &update.session {
-            sections.push(card([card_content([self.replay_card(&session.replay, 200.0)]).pt(tokens::SPACE_5)]));
+        match (party.watching(), &update.session) {
+            // Watching: the timeline takes the window. What the replay is
+            // shrinks to one line, with the party's buttons on it.
+            (Some(watch), Some(session)) => {
+                sections.push(self.watching_bar(update, session, party.over));
+                if update.stage != Stage::Playing || party.over {
+                    sections.push(status_block(update, party.over));
+                }
+                let view = column([watch.timeline.view(cx)]).width(Size::Fill(1.0));
+                sections.push(if party.game_line_moves() { view.redraw_within(GAME_LINE_FRAME) } else { view });
+                if update.stage == Stage::Playing {
+                    sections.push(text(CHAT_HINT).caption().muted().ellipsis());
+                }
+            }
+            _ => {
+                if let Some(session) = &update.session {
+                    sections.push(card([card_content([self.replay_card(&session.replay, 200.0)]).pt(tokens::SPACE_5)]));
+                }
+                sections.push(status_block(update, party.over));
+                let (start, leave) = party_buttons(update, party.over);
+                sections.push(row(start.into_iter().chain([spacer(), leave])).gap(tokens::SPACE_2).align(Align::Center));
+                if let (Some(view), Some(session), false) = (&update.timeline, &update.session, party.over) {
+                    sections.push(statistics_line(view, session));
+                }
+            }
         }
-        sections.push(status_block(update, party.over));
-        sections.push(self.party_actions(update, party.over));
         if let Some(session) = &update.session {
             sections.push(viewers_card(session, &update.name));
         }
         scroll(sections).key("party-scroll").gap(tokens::SPACE_4).fill_height()
     }
 
-    fn party_actions(&self, update: &client::Update, over: bool) -> El {
-        let phase = update.session.as_ref().map(|s| s.phase);
-        let installed = matches!(update.stage, Stage::Ready | Stage::Closed);
-        let mut buttons: Vec<El> = Vec::new();
-        if !over && installed && matches!(phase, Some(Phase::Idle | Phase::Failed)) {
-            let again = update.session.as_ref().is_some_and(|s| s.run > 0);
-            buttons
-                .push(button(if again { "Start again for everyone" } else { "Start for everyone" }).key("party:start").primary());
-        }
-        if !over && update.stage == Stage::Closed && phase == Some(Phase::Running) {
-            buttons.push(button("Rejoin").key("party:rejoin").primary());
-        }
-        buttons.push(button("Copy invite link").key("party:copy").secondary());
-        buttons.push(spacer());
-        buttons.push(button(if over { "Close" } else { "Leave" }).key("party:leave").ghost());
-        row(buttons).gap(tokens::SPACE_2).align(Align::Center)
+    /// What is being watched, in one line: the map's picture, the map and
+    /// who plays, where this viewer stands, and the party's buttons. The
+    /// game's length is left out: the timeline below may be hiding it.
+    fn watching_bar(&self, update: &client::Update, session: &SessionView, over: bool) -> El {
+        let state = if session.ended {
+            badge("Replay finished").muted()
+        } else if update.stage == Stage::Playing {
+            badge("In game").success()
+        } else {
+            badge("Not in game").muted()
+        };
+        let (start, leave) = party_buttons(update, over);
+        let mut items = vec![
+            self.picture(&session.replay.map, 40.0),
+            column([
+                text(session.replay.map.clone()).label().ellipsis(),
+                text(versus(&session.replay)).caption().muted().ellipsis(),
+            ])
+            .gap(2.0)
+            .width(Size::Fill(1.0)),
+            state,
+        ];
+        items.extend(start);
+        items.push(leave);
+        row(items).gap(tokens::SPACE_3).align(Align::Center)
     }
 
     fn replays_view(&self) -> El {
@@ -759,6 +1023,54 @@ impl Ui {
     }
 }
 
+/// The party's buttons: those that start something and the invite link, and
+/// the one that leaves, which stands apart at the far end.
+fn party_buttons(update: &client::Update, over: bool) -> (Vec<El>, El) {
+    let phase = update.session.as_ref().map(|s| s.phase);
+    // After a run the engine may still be open: the next one can start regardless.
+    let installed = matches!(update.stage, Stage::Ready | Stage::Closed | Stage::Playing);
+    let mut buttons: Vec<El> = Vec::new();
+    if !over && installed && matches!(phase, Some(Phase::Idle | Phase::Failed)) {
+        let again = update.session.as_ref().is_some_and(|s| s.run > 0);
+        buttons.push(button(if again { "Start again for everyone" } else { "Start for everyone" }).key("party:start").primary());
+    }
+    if !over && update.stage == Stage::Closed && phase == Some(Phase::Running) {
+        buttons.push(button("Rejoin").key("party:rejoin").primary());
+    }
+    buttons.push(button("Copy invite link").key("party:copy").secondary());
+    (buttons, button(if over { "Close" } else { "Leave" }).key("party:leave").ghost())
+}
+
+/// The game's length as the replay's header gives it; a header that gives none
+/// counts as the longest game there is, so that a game position is never cut
+/// short by it (the statistics, once complete, say how long it really was).
+fn replay_length(session: &SessionView) -> u32 {
+    match session.replay.duration_s {
+        0 => barwatch_core::timeline::MAX_FRAME / 30,
+        s => s,
+    }
+}
+
+/// Where the statistics stand, in one quiet line, for a viewer who is not
+/// in the game yet: the stats service starts on a replay when its party is
+/// made, so this says whether the timeline will have numbers from the start.
+fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
+    let words = match (timeline::feed(view), &view.doc) {
+        (timeline::Feed::Unavailable(why) | timeline::Feed::Failed(why), _) => format!("Statistics: none. {why}"),
+        (timeline::Feed::Complete, None) => "Statistics: none. The server sent none.".to_owned(),
+        (timeline::Feed::Complete, Some(_)) => "Statistics: ready. A timeline of the game shows here once you are in it.".to_owned(),
+        (timeline::Feed::Building, Some(doc)) => {
+            let done = doc.frames / 30;
+            format!("Statistics: worked out up to {} of {} so far.", clock(done), clock(session.replay.duration_s.max(done)))
+        }
+        (timeline::Feed::Building, None) => "Statistics: being worked out.".to_owned(),
+        (timeline::Feed::Queued | timeline::Feed::Asking, _) => "Statistics: the stats service has this replay in its queue.".to_owned(),
+    };
+    row([icon("chart-line").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND), text(words).caption().muted().wrap_text().width(Size::Fill(1.0))])
+        .gap(tokens::SPACE_2)
+        .align(Align::Center)
+}
+
 /// Where this viewer stands, in words.
 fn status_block(update: &client::Update, over: bool) -> El {
     let phase = update.session.as_ref().map(|s| s.phase);
@@ -854,6 +1166,148 @@ mod tests {
             let mut hover = UiEvent::synthetic_click("consent:dismiss");
             hover.kind = kind;
             assert!(!declines_consent(&hover), "{kind:?}");
+        }
+    }
+
+    /// The party's timeline as the client's updates drive it (DESIGN.md §5.4, §5.7).
+    mod watch {
+        use super::*;
+        use crate::fixtures::{at, docs, view, watching};
+        use api::TimelineState;
+
+        fn stats() -> Option<Arc<TimelineView>> {
+            view(TimelineState::Complete, None, Some(docs::duel()))
+        }
+
+        fn party(update: client::Update) -> Party {
+            let mut party = Party::new(Url::parse("https://watch.example.org/").unwrap(), "abcdefghijklmnopqrstuv".into());
+            party.update = Some(update);
+            party.sync_watch();
+            party.tick_watch();
+            party
+        }
+
+        /// The next update from the client, as the window takes it in.
+        fn next(party: &mut Party, update: impl FnOnce(&mut client::Update)) {
+            let mut u = party.update.clone().unwrap();
+            u.jump_refused = false;
+            update(&mut u);
+            party.update = Some(u);
+            party.sync_watch();
+            party.tick_watch();
+        }
+
+        fn jump(target_s: u32, at_unix: u64) -> impl FnOnce(&mut client::Update) {
+            move |u| u.session.as_mut().unwrap().jump = Some(JumpView { target_s, at_unix })
+        }
+
+        fn jumping(party: &Party) -> Option<f32> {
+            party.watching().and_then(|w| w.timeline.jumping_to())
+        }
+
+        #[test]
+        fn shown_once_in_game_with_its_statistics() {
+            let mut out = watching(false, None, stats());
+            out.stage = Stage::Ready;
+            out.session.as_mut().unwrap().phase = Phase::Idle;
+            let mut p = party(out);
+            assert!(p.watching().is_none(), "not before the game runs");
+            next(&mut p, |u| {
+                u.stage = Stage::Playing;
+                u.session.as_mut().unwrap().phase = Phase::Running;
+                u.position = at(300);
+            });
+            let w = p.watching().expect("in game");
+            assert_eq!(w.timeline.game_s(), 300.0);
+            assert!(w.timeline.data.metric_index("valueArmy").is_some());
+        }
+
+        #[test]
+        fn a_jump_by_another_viewer_shows_until_this_engine_gets_there() {
+            let mut p = party(watching(false, at(360), stats()));
+            next(&mut p, jump(840, 1000));
+            assert_eq!(jumping(&p), Some(840.0));
+            next(&mut p, |u| u.position = at(600));
+            assert_eq!(jumping(&p), Some(840.0), "catching up");
+            next(&mut p, |u| u.position = at(839));
+            assert_eq!(jumping(&p), None, "arrived, within a keyframe");
+            // The same jump named again is not a new one.
+            next(&mut p, |u| u.position = at(845));
+            assert_eq!(jumping(&p), None);
+        }
+
+        #[test]
+        fn a_jump_made_before_this_viewer_was_in_game_is_not_under_way() {
+            let mut update = watching(false, at(5), stats());
+            jump(840, 1000)(&mut update);
+            let mut p = party(update);
+            assert_eq!(jumping(&p), None, "the engine is catching up to the party, not to that jump");
+            // A later jump is.
+            next(&mut p, jump(900, 1100));
+            assert_eq!(jumping(&p), Some(900.0));
+        }
+
+        #[test]
+        fn a_jump_while_out_of_the_game_is_not_shown_on_rejoining() {
+            let mut p = party(watching(false, at(200), stats()));
+            next(&mut p, |u| {
+                u.stage = Stage::Closed;
+                u.position = None;
+            });
+            assert!(p.watching().is_none());
+            next(&mut p, jump(700, 1000));
+            next(&mut p, |u| {
+                u.stage = Stage::Playing;
+                u.position = at(20);
+            });
+            assert_eq!(jumping(&p), None);
+            assert_eq!(p.watching().unwrap().timeline.game_s(), 20.0, "the engine started over");
+        }
+
+        #[test]
+        fn a_refused_jump_is_called_off() {
+            let mut p = party(watching(false, at(360), stats()));
+            p.watch.as_mut().unwrap().timeline.show_jump(900.0);
+            assert_eq!(jumping(&p), Some(900.0));
+            next(&mut p, |u| u.jump_refused = true);
+            assert_eq!(jumping(&p), None);
+        }
+
+        #[test]
+        fn a_new_run_starts_over_and_an_ended_one_stays_to_look_back_on() {
+            let mut p = party(watching(false, at(700), stats()));
+            next(&mut p, |u| {
+                let s = u.session.as_mut().unwrap();
+                s.ended = true;
+                u.position = at(1271);
+            });
+            let w = p.watching().expect("after the end, for one who was in it");
+            assert_eq!(w.timeline.game_s(), w.timeline.data.duration_s, "game over");
+            // The engine closed after the end: still there.
+            next(&mut p, |u| {
+                u.stage = Stage::Closed;
+                u.position = None;
+            });
+            assert!(p.watching().is_some());
+            // Started again: gone until this viewer is in the new run's game.
+            next(&mut p, |u| {
+                let s = u.session.as_mut().unwrap();
+                s.ended = false;
+                s.run = 2;
+            });
+            assert!(p.watching().is_none());
+            // An engine still open from the last run is not in this one.
+            next(&mut p, |u| {
+                u.stage = Stage::Playing;
+                u.engine_run = Some(1);
+            });
+            assert!(p.watching().is_none(), "the engine left open in the last run");
+            next(&mut p, |u| {
+                u.engine_run = Some(2);
+                u.position = at(3);
+            });
+            let w = p.watching().expect("in the new run");
+            assert_eq!(w.timeline.game_s(), 3.0);
         }
     }
 
