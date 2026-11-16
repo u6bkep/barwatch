@@ -15,7 +15,7 @@ use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const SCENES: [&str; 21] = [
+pub const SCENES: [&str; 22] = [
     "empty",
     "preparing",
     "ready",
@@ -34,6 +34,7 @@ pub const SCENES: [&str; 21] = [
     "timeline-teams",
     "timeline-unavailable",
     "timeline-stopped",
+    "timeline-outage",
     "timeline-jump",
     "timeline-silent",
     "timeline-over",
@@ -339,13 +340,30 @@ pub fn scene(name: &str) -> Option<Ui> {
                 view(TimelineState::Unavailable, Some("This server does not offer statistics: it is older than they are."), None),
             ),
         ),
-        // The stats service was lost at 6:00; the game is at 9:00.
+        // The stats service gave up on the game at 6:00; the game is at 9:00.
         "timeline-stopped" => ui.fixture_party(
             server,
             watching(
                 false,
                 at(540),
-                view(TimelineState::Failed, Some("The stats service stopped answering."), Some(docs::prefix(&duel, 10_800))),
+                view(
+                    TimelineState::Failed,
+                    Some("The statistics service could not work out this game: the simulation ended early."),
+                    Some(docs::prefix(&duel, 10_800)),
+                ),
+            ),
+        ),
+        // The stats service cannot be reached since 6:00; the server keeps trying.
+        "timeline-outage" => ui.fixture_party(
+            server,
+            watching(
+                false,
+                at(540),
+                view(
+                    TimelineState::Unavailable,
+                    Some("The statistics service cannot be reached; trying again."),
+                    Some(docs::prefix(&duel, 10_800)),
+                ),
             ),
         ),
         // Another viewer jumped everyone from 6:00 to 14:00; this engine is on its way.

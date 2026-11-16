@@ -237,7 +237,10 @@ pub enum Feed {
     /// The server has not answered yet.
     #[default]
     Asking,
-    /// There are none to be had, and why, in words for the viewer.
+    /// There are none to be had right now, and why, in words for the viewer.
+    /// With statistics already there, an outage: the server keeps what it
+    /// has and keeps trying (a service out of reach, a turn to wait for), so
+    /// more may come. Without, it may be for good (no stats service).
     Unavailable(String),
     /// The stats service has the game and has not started on it.
     Queued,
@@ -250,9 +253,24 @@ pub enum Feed {
 }
 
 impl Feed {
-    /// No more will come than there is now.
+    /// No more will come than there is now: the stats service gave up on the
+    /// game. An outage ([`Feed::Unavailable`]) is not this: the server is
+    /// still trying.
     fn stopped(&self) -> bool {
-        matches!(self, Feed::Unavailable(_) | Feed::Failed(_))
+        matches!(self, Feed::Failed(_))
+    }
+
+    /// Statistics that should be growing and are not, for now.
+    fn interrupted(&self) -> bool {
+        matches!(self, Feed::Unavailable(_))
+    }
+
+    /// What the server said about an outage or a failure, in its words.
+    fn note(&self) -> Option<&str> {
+        match self {
+            Feed::Unavailable(why) | Feed::Failed(why) => Some(why),
+            _ => None,
+        }
     }
 }
 
@@ -655,7 +673,13 @@ impl Timeline {
         } else if self.hiding() && t > self.game_s {
             Some("Hidden until the game gets there")
         } else if t > self.data.computed_s {
-            Some(if self.feed.stopped() { "No statistics from here on" } else { "Still being worked out" })
+            Some(if self.feed.stopped() {
+                "No statistics from here on"
+            } else if self.feed.interrupted() {
+                "Waiting for the stats service"
+            } else {
+                "Still being worked out"
+            })
         } else {
             None
         }
@@ -952,6 +976,7 @@ impl Timeline {
         let grid = stack([column(tracks).width(Size::Fill(1.0)), self.overlay(&f, tracks_h)]).width(Size::Fill(1.0));
         let mut parts = vec![self.header(&f)];
         parts.extend(self.silence_notice());
+        parts.extend(self.statistics_notice());
         parts.push(grid);
         if charts {
             parts.push(self.table(&f));
@@ -1035,11 +1060,17 @@ impl Timeline {
         // Statistics that lag behind the game: the readouts are older than
         // what is on screen in the game, and the viewer should know.
         if let Some(lag) = self.lag_s().filter(|lag| *lag >= LAG_WORTH_SAYING_S) {
+            let note = self.feed.note().map(|n| format!("{n} ")).unwrap_or_default();
             clock_line.push(if self.feed.stopped() {
                 badge(format!("No statistics after {}", clock(d.computed_s)))
                     .muted()
                     .key("tl:lag")
-                    .tooltip("The stats service stopped there. The game and the jump button carry on without them.")
+                    .tooltip(format!("{note}The game and the jump button carry on without them."))
+            } else if self.feed.interrupted() {
+                badge(format!("Statistics {} behind", clock(lag)))
+                    .warning()
+                    .key("tl:lag")
+                    .tooltip(format!("{note}Readouts show the latest that came."))
             } else {
                 badge(format!("Statistics {} behind", clock(lag)))
                     .warning()
@@ -1171,23 +1202,26 @@ impl Timeline {
                 "It may still be loading. If it is running, user widgets are probably switched off in BAR's settings: the game line needs them.",
             )
         };
-        Some(
-            row([
-                icon("circle-alert").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND),
-                column([text(title).label(), text(detail).caption().muted().wrap_text()]).gap(2.0).width(Size::Fill(1.0)),
-                button("Use the timeline without it")
-                    .key(KEY_FREE)
-                    .secondary()
-                    .small()
-                    .tooltip("Shows the whole timeline with nothing hidden, and lets a jump go to any moment"),
-            ])
-            .gap(tokens::SPACE_3)
-            .align(Align::Center)
-            .padding(Sides::xy(tokens::SPACE_3, tokens::SPACE_2))
-            .fill(chosen_surface())
-            .stroke(tokens::BORDER)
-            .radius(tokens::RADIUS_MD),
-        )
+        let free = button("Use the timeline without it")
+            .key(KEY_FREE)
+            .secondary()
+            .small()
+            .tooltip("Shows the whole timeline with nothing hidden, and lets a jump go to any moment");
+        Some(notice(title, detail.to_owned(), Some(free)))
+    }
+
+    /// A line above the tracks while statistics that should be growing are
+    /// not: the server's own words for why, and whether more will come. Not
+    /// once the statistics cover the whole game: nothing is missing then.
+    fn statistics_notice(&self) -> Option<El> {
+        let why = self.feed.note().filter(|_| self.has_data && self.data.computed_s < self.data.duration_s)?;
+        let title = if self.feed.stopped() { "No more statistics for this replay" } else { "Statistics interrupted" };
+        let detail = if self.feed.stopped() {
+            format!("{why} What came before stays; the game and the jump button carry on.")
+        } else {
+            format!("{why} What came so far stays, and the rest fills in once they come again.")
+        };
+        Some(notice(title, detail, None).key("tl:stats-notice"))
     }
 
     // ---- tracks ----------------------------------------------------------
@@ -2046,8 +2080,10 @@ impl Timeline {
         if self.has_data && d.computed_s < d.duration_s && from < reach {
             let stopped = self.feed.stopped();
             // Up to the game the viewer is waiting for these: that part moves.
-            // Past it, and where no more will come, the band stands still.
-            let waiting_to = if self.free || stopped { from } else { g.clamp(from, reach) };
+            // Past it, where no more will come, and while nothing comes (an
+            // outage), the band stands still.
+            let still = stopped || self.feed.interrupted();
+            let waiting_to = if self.free || still { from } else { g.clamp(from, reach) };
             if waiting_to > from {
                 items.push((Place::Span { from, to: waiting_to, top: fog_top, bottom: 0.0 }, skeleton().radius(0.0)));
             }
@@ -2057,9 +2093,15 @@ impl Timeline {
                     quad(Color::srgb_u8(39, 39, 42).with_alpha(0.55)),
                 ));
             }
-            let say = if stopped { "No statistics from here on" } else { "Working out the numbers…" };
+            let say = if stopped {
+                "No statistics from here on"
+            } else if self.feed.interrupted() {
+                "Waiting for the stats service"
+            } else {
+                "Working out the numbers…"
+            };
             let (a, b) = if waiting_to > from { (from, waiting_to) } else { (from, reach) };
-            if (b - a) * f.w > if stopped { 170.0 } else { 150.0 } {
+            if (b - a) * f.w > if still { 180.0 } else { 150.0 } {
                 items.push(words(a, b, say));
             }
         }
@@ -2414,6 +2456,23 @@ fn hover_ring(at: f32, y: f32, color: Color, r: f32) -> (Place, El) {
         Place::Tag { at, w: Some(2.0 * r), h: 2.0 * r, top: y - r, anchor: Anchor::Center },
         El::new(Kind::Custom("tl_ring")).fill(Color::srgb_u8(9, 9, 11)).stroke(color).stroke_width(1.5).radius(r),
     )
+}
+
+/// A line of news above the tracks: an alert sign, a title, the detail
+/// beneath it, and what can be done about it.
+fn notice(title: &str, detail: String, action: Option<El>) -> El {
+    let mut items = vec![
+        icon("circle-alert").icon_size(tokens::ICON_SM).text_color(tokens::MUTED_FOREGROUND),
+        column([text(title).label(), text(detail).caption().muted().wrap_text()]).gap(2.0).width(Size::Fill(1.0)),
+    ];
+    items.extend(action);
+    row(items)
+        .gap(tokens::SPACE_3)
+        .align(Align::Center)
+        .padding(Sides::xy(tokens::SPACE_3, tokens::SPACE_2))
+        .fill(chosen_surface())
+        .stroke(tokens::BORDER)
+        .radius(tokens::RADIUS_MD)
 }
 
 /// The mark at the left of a row, drawn as a radio button because that is
@@ -2985,6 +3044,53 @@ mod tests {
         let last = *plain.rows().last().unwrap();
         let (top, h) = plain.track_span(Track::Row(last));
         assert_eq!(top + h, plain.tracks_height(&frame(false)));
+    }
+
+    /// Whether `key` is anywhere in `el`.
+    fn has_key(el: &El, key: &str) -> bool {
+        el.key.as_deref() == Some(key) || el.children.iter().any(|c| has_key(c, key))
+    }
+
+    /// Every text in `el`, in order.
+    fn texts(el: &El) -> Vec<String> {
+        let mut out: Vec<String> = el.text.iter().cloned().collect();
+        for c in &el.children {
+            out.extend(texts(c));
+        }
+        out
+    }
+
+    /// An outage while statistics exist is said where the viewer looks, in
+    /// the server's words, as an interruption; only a failure says the
+    /// numbers stop.
+    #[test]
+    fn an_outage_is_said_and_is_not_the_end() {
+        let theme = Theme::default();
+        let cx = BuildCx::new(&theme).with_viewport(1180.0, 900.0);
+        let mut t = timeline();
+        t.data.computed_s = 360.0;
+        let note = "The statistics service cannot be reached; trying again.";
+        t.feed = Feed::Unavailable(note.into());
+        assert!(!t.feed.stopped());
+        assert_eq!(t.hidden_reason(500.0), Some("Waiting for the stats service"));
+        let view = t.view(&cx);
+        assert!(has_key(&view, "tl:stats-notice"));
+        let words = texts(&view).join("\n");
+        assert!(words.contains("Statistics interrupted") && words.contains(note), "{words}");
+        assert!(words.contains("Statistics 4:00 behind"), "{words}");
+        assert!(!words.contains("No statistics"), "{words}");
+        // A failure is final.
+        t.feed = Feed::Failed("The statistics service could not work out this game: boom".into());
+        let words = texts(&t.view(&cx)).join("\n");
+        assert!(words.contains("No more statistics for this replay") && words.contains("boom"), "{words}");
+        assert!(words.contains("No statistics after 6:00"), "{words}");
+        // Statistics that cover the whole game miss nothing: no notice.
+        t.data.computed_s = t.data.duration_s;
+        assert!(!has_key(&t.view(&cx), "tl:stats-notice"));
+        // And while they grow as they should, none either.
+        t.data.computed_s = 360.0;
+        t.feed = Feed::Building;
+        assert!(!has_key(&t.view(&cx), "tl:stats-notice"));
     }
 
     #[test]

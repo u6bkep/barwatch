@@ -456,6 +456,22 @@ metrics a chase; the large chart also stops being where the eye left it.
 Still open: the fight-heat scale (damage per metal of income, full at 8) is a guess to
 revisit with real games.
 
+### 5.9 After the integration run (2026-11-16)
+
+- **A stats outage is said, and is not the end.** With a document there, `unavailable`
+  is an outage: the server keeps the document and keeps trying (service out of reach,
+  a turn to wait for, a token refused, records it cannot read yet; all retried). Only
+  `failed` is final. While either holds and the statistics stop short of the game's
+  end, a notice above the tracks gives the server's note: "Statistics interrupted"
+  (outage; what came stays, the rest fills in once they come again) or "No more
+  statistics for this replay" (failed). The lag badge stays "Statistics N behind"
+  through an outage, with the note as its tooltip; "No statistics after X" only once
+  failed. The band past the statistics stands still during an outage ("Waiting for the
+  stats service") instead of shimmering as if they were being worked out. Before the
+  viewer is in game the one-line summary says the same ("…so far, then interrupted").
+  REJECTED: putting the note in the header's status caption, which the cursor and the
+  jump already use and which is cut short in a narrow window.
+
 ## 6. Testing
 
 A window can be driven without appearing on the user's screen: a headless sway

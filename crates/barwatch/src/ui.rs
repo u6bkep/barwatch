@@ -1055,14 +1055,22 @@ fn replay_length(session: &SessionView) -> u32 {
 /// in the game yet: the stats service starts on a replay when its party is
 /// made, so this says whether the timeline will have numbers from the start.
 fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
+    let so_far = |doc: &barwatch_core::timeline::TimelineDoc| {
+        let done = doc.frames / 30;
+        format!("worked out up to {} of {}", clock(done), clock(session.replay.duration_s.max(done)))
+    };
     let words = match (timeline::feed(view), &view.doc) {
+        // An outage: the server keeps what it has and keeps trying.
+        (timeline::Feed::Unavailable(why), Some(doc)) if !doc.complete => {
+            format!("Statistics: {} so far, then interrupted. {why}", so_far(doc))
+        }
+        (timeline::Feed::Failed(why), Some(doc)) if !doc.complete => {
+            format!("Statistics: {}, and no further. {why}", so_far(doc))
+        }
         (timeline::Feed::Unavailable(why) | timeline::Feed::Failed(why), _) => format!("Statistics: none. {why}"),
         (timeline::Feed::Complete, None) => "Statistics: none. The server sent none.".to_owned(),
         (timeline::Feed::Complete, Some(_)) => "Statistics: ready. A timeline of the game shows here once you are in it.".to_owned(),
-        (timeline::Feed::Building, Some(doc)) => {
-            let done = doc.frames / 30;
-            format!("Statistics: worked out up to {} of {} so far.", clock(done), clock(session.replay.duration_s.max(done)))
-        }
+        (timeline::Feed::Building, Some(doc)) => format!("Statistics: {} so far.", so_far(doc)),
         (timeline::Feed::Building, None) => "Statistics: being worked out.".to_owned(),
         (timeline::Feed::Queued | timeline::Feed::Asking, _) => "Statistics: the stats service has this replay in its queue.".to_owned(),
     };
