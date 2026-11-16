@@ -8,7 +8,7 @@ use crate::autohost::{Event, Notice};
 use crate::chat::{self, Command};
 use crate::state::{App, Session};
 use anyhow::{bail, Context, Result};
-use barwatch_core::api::{Control, Phase};
+use barwatch_core::api::{Control, JumpView, Phase};
 use barwatch_core::engine::{self, Binary, Os};
 use barwatch_core::script;
 use std::net::SocketAddr;
@@ -139,6 +139,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
     // Unpaused time since the replay stream began; `None` before it has.
     let mut played: Option<Duration> = None;
     let mut pregame_skipped = false;
+    let mut clock = GameClock::default();
     let tick_every = Duration::from_millis(250);
     let mut tick = tokio::time::interval(tick_every);
     let mut buf = vec![0u8; 65536];
@@ -185,7 +186,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                     }),
                     Some(Event::Chat { text, .. }) => match chat::parse(&text) {
                         Some(Ok(Command::Control(control))) => {
-                            let reply = apply(&link, session, control, pregame_skipped).await;
+                            let reply = apply(&link, session, control, pregame_skipped, &mut clock).await;
                             link.send(&reply).await;
                         }
                         Some(Ok(Command::Help)) => link.send(chat::HELP).await,
@@ -197,7 +198,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             }
             cmd = cmds.recv() => match cmd {
                 Some(RunnerCmd::Control(control)) => {
-                    let reply = apply(&link, session, control, pregame_skipped).await;
+                    let reply = apply(&link, session, control, pregame_skipped, &mut clock).await;
                     link.send(&reply).await;
                 }
                 Some(RunnerCmd::Stop) | None => {
@@ -206,14 +207,19 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             },
             _ = tick.tick() => {
                 if let Some(time) = &mut played {
-                    if !session.read(|st| st.paused) {
+                    let (paused, speed) = session.read(|st| (st.paused, st.speed));
+                    if !paused {
                         *time += tick_every;
+                        if pregame_skipped {
+                            clock.advance(tick_every, speed);
+                        }
                     }
                     // The recording opens with the original lobby wait; nobody wants
                     // to sit through it again.
                     if !pregame_skipped && *time >= SKIP_SAFE_AFTER {
                         pregame_skipped = true;
                         link.send("/skip 1").await;
+                        clock.skipped_to(1);
                     }
                 }
                 if !listening && launched.elapsed() > START_TIMEOUT {
@@ -234,7 +240,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
 }
 
 /// The control socket and the address the server talks to us from.
-struct Link {
+pub(crate) struct Link {
     socket: UdpSocket,
     peer: Option<SocketAddr>,
 }
@@ -261,14 +267,69 @@ async fn begin_stop(link: &Link, child: &mut tokio::process::Child, stopping: &m
     *stopping = Some((Instant::now(), reason.to_string()));
 }
 
+/// Where the hosting server is in the game, in game seconds, as far as the daemon
+/// can tell. The engine reports no position over the autohost interface, so this
+/// counts unpaused time at the speed the daemon last set, from the pre-game skip
+/// (game second 1) on, and never stays behind a skip target. It runs off when
+/// viewers change the speed with their own keys (the daemon is not told), and it
+/// is only used to turn a relative skip into the absolute target `jump` reports.
+#[derive(Default)]
+pub(crate) struct GameClock {
+    pos_s: f64,
+    /// The furthest target skipped to in this run: the server stands at or past it,
+    /// so any skip to an earlier time is ignored by the engine.
+    furthest: Option<u32>,
+}
+
+impl GameClock {
+    pub(crate) fn advance(&mut self, dt: Duration, speed: f32) {
+        self.pos_s += dt.as_secs_f64() * f64::from(speed.max(0.0));
+    }
+
+    pub(crate) fn skipped_to(&mut self, target_s: u32) {
+        self.pos_s = self.pos_s.max(f64::from(target_s));
+    }
+
+    /// The absolute game second a skip lands on; for a relative one, from the
+    /// estimate (the engine itself adds to its exact frame).
+    fn target(&self, seconds: u32, relative: bool) -> u32 {
+        if relative {
+            (self.pos_s.max(0.0).min(f64::from(u32::MAX)) as u32).saturating_add(seconds)
+        } else {
+            seconds
+        }
+    }
+
+    /// Records a skip; `true` if it goes further than any before in this run (an
+    /// earlier target is ignored by the engine, and must not replace a jump that
+    /// viewers may still be catching up to).
+    fn skip(&mut self, target_s: u32) -> bool {
+        let further = self.furthest.is_none_or(|f| target_s > f);
+        if further {
+            self.furthest = Some(target_s);
+        }
+        self.skipped_to(target_s);
+        further
+    }
+}
+
 /// Carries out a playback command; returns the line to announce in game chat.
-async fn apply(link: &Link, session: &Session, control: Control, skips_safe: bool) -> String {
+pub(crate) async fn apply(link: &Link, session: &Session, control: Control, skips_safe: bool, game: &mut GameClock) -> String {
     match control {
         Control::Skip { .. } if !skips_safe => "barwatch: the replay is only just starting; try again in a moment".into(),
         Control::Skip { seconds, relative } => {
             // Exact on the server; each viewer's engine then replays the gap as fast
             // as it can. A target already passed is ignored by the engine.
             link.send(&format!("/skip {}{seconds}", if relative { "+" } else { "" })).await;
+            // The engine stops at the end of the recording.
+            let length = session.read(|st| st.replay.duration_s);
+            let mut target_s = game.target(seconds, relative);
+            if length > 0 {
+                target_s = target_s.min(length);
+            }
+            if game.skip(target_s) {
+                session.mutate(|st| st.jump = Some(JumpView { target_s, at_unix: crate::state::unix_now() }));
+            }
             if relative {
                 format!("barwatch: jumping ahead {}", clock(seconds))
             } else {
@@ -321,6 +382,22 @@ fn log_tail(run_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_targets_are_absolute() {
+        let mut c = GameClock::default();
+        c.skipped_to(1);
+        c.advance(Duration::from_secs(60), 2.0);
+        assert_eq!(c.target(120, true), 241);
+        assert_eq!(c.target(600, false), 600);
+        assert!(c.skip(600));
+        assert_eq!(c.target(30, true), 630);
+        // Behind the furthest jump: the engine ignores it, and the jump stands.
+        assert!(!c.skip(300));
+        assert!(c.skip(c.target(30, true)));
+        c.advance(Duration::from_secs(10), 0.5);
+        assert_eq!(c.target(0, true), 635);
+    }
 
     #[test]
     fn clock_format() {
