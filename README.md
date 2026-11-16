@@ -53,6 +53,21 @@ from game chat, and the server's web page has buttons for the same things:
 Jumps only go forward: the engine cannot rewind. To go back, stop the party and start
 it again.
 
+### The statistics timeline
+
+If the server has a stats service (below), the app shows the game's statistics beside
+the party: each side's economy, army value, damage, units built and lost, on one time
+axis, with markers for moments such as a first tech 2 factory, a commander killed or a
+nuke built. Your own game is the line across the charts; move the cursor to read any
+moment, and **Jump everyone to …** to move the party forward to it. What has not
+happened yet stays hidden unless you choose to show it. The numbers arrive while the
+service simulates the replay, usually well ahead of the party; marker pictures come from
+your installed game.
+
+The app learns where your game is from a small widget it puts only into the games it
+starts. Without a stats service on the server there is no timeline and nothing else
+changes.
+
 ## Starting a watch party
 
 On the server's web page: drop a `.sdfz` replay onto it, or paste a replay link or id
@@ -78,8 +93,8 @@ docker compose up -d
 | replays, engines, state | `/data` | `BARWATCH_DATA` |
 | largest replay accepted | 256 MiB | `BARWATCH_MAX_UPLOAD_MB` |
 | parties are deleted after | 14 days | `BARWATCH_SESSION_DAYS` |
-| stats service for the statistics timeline (bar-replays) | none | `BARWATCH_STATS_URL` |
-| its `client` token | none | `BARWATCH_STATS_TOKEN` |
+| stats service for the statistics timeline (bar-replays), optional | none | `BARWATCH_STATS_URL` |
+| its `client` token, or a file holding it (e.g. a Docker secret) | none | `BARWATCH_STATS_TOKEN`, `BARWATCH_STATS_TOKEN_FILE` |
 
 **The daemon has no login of its own.** The intended setup:
 
@@ -94,6 +109,15 @@ docker compose up -d
 
 Anyone who learns a running party's UDP port can connect to it as a spectator: the
 engine has no access control when it hosts a replay.
+
+**The stats service is optional.** It is
+[bar-replays](https://github.com/u6bkep/bar-replays), which simulates each party's replay
+and streams the statistics; run it in the same compose stack and point
+`BARWATCH_STATS_URL` at it over the stack's network (`http://bar-replays:8770/`), with a
+token of role `client` minted there (`bar-replays token add --name barwatch --role client`).
+With it, replays given by link or id come through its archive and uploads are handed to
+it. If it is slow or down, parties go on and the timeline says so. Without it: no
+timeline, everything else as before.
 
 The server needs no game content. For each replay it downloads the matching engine
 release once (about 35 MB) and runs its dedicated server, which only streams the

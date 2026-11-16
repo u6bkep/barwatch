@@ -1,7 +1,9 @@
 # barwatch: replay timeline (design)
 
-Status (2026-11-15): **a prototype exists; nothing below is wired to a server or an
-engine.** Branch `timeline-prototype`, uncommitted. This document is the brief for the
+Status (2026-11-16): T1–T5 are built (each section's "as built" notes), on branch
+`timeline-prototype`; release preparation for 0.3.0 on `release-prep` (`CHANGELOG.md`).
+Status (2026-11-15, kept for the record): a prototype existed; nothing below was wired to
+a server or an engine. This document is the brief for the
 implementation work. The stats service it talks to is designed in
 `../bar-replays/DESIGN.md` §9 (this repository's sibling, not yet public).
 
@@ -198,6 +200,8 @@ here, "Watch together"). No timeline on the web page for now.
 following, the timeline call), `examples/fake_stats` (a stand-in service, also used by
 the tests in `src/stats_tests.rs`). Choices this section did not dictate:
 - `BARWATCH_STATS_URL` without `BARWATCH_STATS_TOKEN` refuses to start.
+  `BARWATCH_STATS_TOKEN_FILE` (added for 0.3.0, release preparation) reads the token from a
+  file instead, e.g. a compose secret; giving both is refused.
 - A link or id party registers by game id and falls back to uploading the file when
   the service cannot find it. The `game_id` the service answers with must be the one
   in the replay's header. Registration retries with backoff (up to 5 min) for an hour

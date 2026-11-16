@@ -65,6 +65,10 @@ struct Args {
     /// command-line flag is visible to every user of the machine.
     #[arg(long, env = "BARWATCH_STATS_TOKEN", hide_env_values = true)]
     stats_token: Option<String>,
+    /// A file holding the `client` token (e.g. a Docker secret), instead of
+    /// BARWATCH_STATS_TOKEN.
+    #[arg(long, env = "BARWATCH_STATS_TOKEN_FILE", conflicts_with = "stats_token")]
+    stats_token_file: Option<PathBuf>,
 }
 
 fn parse_ports(s: &str) -> Result<std::ops::RangeInclusive<u16>, String> {
@@ -98,10 +102,24 @@ async fn main() -> Result<()> {
         download_url: args.download_url,
         archive: source::Archive::default(),
     };
-    let stats = match (args.stats_url.as_deref().filter(|u| !u.trim().is_empty()), args.stats_token.as_deref()) {
+    let stats_token = match (&args.stats_token, &args.stats_token_file) {
+        (Some(t), _) => Some(t.clone()),
+        (None, Some(f)) => Some(
+            std::fs::read_to_string(f)
+                .with_context(|| format!("reading BARWATCH_STATS_TOKEN_FILE {}", f.display()))?
+                .trim()
+                .to_owned(),
+        ),
+        (None, None) => None,
+    };
+    let stats = match (args.stats_url.as_deref().filter(|u| !u.trim().is_empty()), stats_token.as_deref()) {
         (None, _) => None,
-        (Some(_), None) => anyhow::bail!("BARWATCH_STATS_URL is set but BARWATCH_STATS_TOKEN is not"),
-        (Some(url), Some(token)) => Some(stats_client::StatsClient::new(url, token).context("BARWATCH_STATS_URL / BARWATCH_STATS_TOKEN")?),
+        (Some(_), None) => {
+            anyhow::bail!("BARWATCH_STATS_URL is set but neither BARWATCH_STATS_TOKEN nor BARWATCH_STATS_TOKEN_FILE is")
+        }
+        (Some(url), Some(token)) => {
+            Some(stats_client::StatsClient::new(url, token).context("BARWATCH_STATS_URL / BARWATCH_STATS_TOKEN")?)
+        }
     };
     match &stats {
         Some(c) => log(&format!("stats service at {}", c.base())),

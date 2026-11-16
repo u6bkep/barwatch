@@ -1,6 +1,6 @@
 name: release
 
-# A tag like v0.2.0 publishes: the Windows app, Linux binaries, and the server image
+# A tag like v0.3.0 publishes: the Windows app, Linux binaries, and the server image
 # on the GitHub container registry.
 on:
   push:

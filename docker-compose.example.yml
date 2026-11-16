@@ -21,10 +21,12 @@ services:
       # name of the web page (for example when the page is behind a CDN or tunnel).
       # BARWATCH_GAME_HOST: bar.example.org
       BARWATCH_UDP_PORTS: 8480-8489
-      # A stats service (bar-replays) for the statistics timeline, and a `client`
-      # token of it. Without them parties have no timeline.
+      # Optional: a stats service (bar-replays) for the statistics timeline, reached
+      # over this stack's network, and a `client` token of it, kept in a file (the
+      # secret below) rather than here. Without them parties have no timeline.
       # BARWATCH_STATS_URL: http://bar-replays:8770/
-      # BARWATCH_STATS_TOKEN: <token from `bar-replays token add --role client`>
+      # BARWATCH_STATS_TOKEN_FILE: /run/secrets/stats_token
+    # secrets: [stats_token]
     ports:
       - "8780:8780"
       - "8480-8489:8480-8489/udp"
@@ -33,3 +35,9 @@ services:
 
 volumes:
   barwatch-data:
+
+# The token file, from `bar-replays token add --name barwatch --role client > stats.token`
+# (readable by the container's user, uid 1000, and no one else):
+# secrets:
+#   stats_token:
+#     file: ./stats.token

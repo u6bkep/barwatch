@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "barwatch"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "barwatch-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "barwatch-host"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "accesskit_android",
  "accesskit_winit",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "barwatchd"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
