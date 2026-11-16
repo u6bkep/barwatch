@@ -85,6 +85,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/info", get(info))
         .route("/sessions", post(create_session_with_token).layer(DefaultBodyLimit::max(app.cfg.max_upload)))
         .route("/sessions/{id}", get(get_session))
+        .route("/sessions/{id}/timeline", get(get_timeline))
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/control", post(control_session))
         .route("/sessions/{id}/viewers", post(join_session))
@@ -131,6 +132,19 @@ async fn get_session(State(app): Shared, Path(id): Path<String>, Query(q): Query
     Ok(Json(view(&app, &session)))
 }
 
+/// `GET /app/v1/sessions/{id}/timeline[?rev=&wait=]`: `api::TimelineView`,
+/// long-polling as the session call does. Asking is demand: it keeps the session's
+/// statistics followed (`timeline.rs`).
+async fn get_timeline(State(app): Shared, Path(id): Path<String>, Query(q): Query<WaitQuery>) -> ApiResult<Response> {
+    let session = find(&app, &id)?;
+    crate::timeline::ensure(&app, &session, true, false);
+    if let Some(rev) = q.rev {
+        session.stats.changed_since(rev, Duration::from_secs(q.wait.unwrap_or(25).min(55))).await;
+    }
+    let body = session.stats.view_json(app.stats.client.is_some()).await;
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
 #[derive(Deserialize)]
 struct FromBar {
     /// A replay id or a link to the replay on BAR's site.
@@ -142,11 +156,29 @@ struct FromBar {
 async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> ApiResult<Json<Created>> {
     let is_json =
         headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("application/json"));
-    let (name, bytes) = if is_json {
+    let (name, bytes, bar_replay) = if is_json {
         let req: FromBar = serde_json::from_slice(&body).map_err(ApiErr::bad)?;
-        let (name, bytes) =
-            source::fetch(&app.http, &req.bar_replay, app.cfg.max_upload).await.map_err(|e| ApiErr::bad(format!("{e:#}")))?;
-        (name, Bytes::from(bytes))
+        let id = source::replay_id(&req.bar_replay).ok_or_else(|| ApiErr::bad("that is not a BAR replay link or id"))?;
+        // Through the stats service's mirror when there is one (DESIGN §4.2); BAR's
+        // store directly when there is not or it fails.
+        let via_service = match &app.stats.client {
+            Some(client) => match source::through_service(client, id, app.cfg.max_upload).await {
+                Ok(got) => {
+                    crate::log(&format!("replay {id} came through the stats service"));
+                    Some(got)
+                }
+                Err(e) => {
+                    crate::log(&format!("replay {id} through the stats service: {e:#}; downloading it directly"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let (name, bytes) = match via_service {
+            Some(got) => got,
+            None => source::fetch(&app.http, &app.cfg.archive, id, app.cfg.max_upload).await.map_err(|e| ApiErr::bad(format!("{e:#}")))?,
+        };
+        (name, Bytes::from(bytes), Some(id.to_ascii_lowercase()))
     } else {
         let name = headers
             .get("x-barwatch-filename")
@@ -155,14 +187,16 @@ async fn create_session(State(app): Shared, headers: HeaderMap, body: Bytes) -> 
                 url::form_urlencoded::parse(format!("n={v}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
             })
             .unwrap_or_default();
-        (name, body)
+        (name, body, None)
     };
     if bytes.is_empty() {
         return Err(ApiErr::bad("no replay was sent"));
     }
-    let session = app.create_session(&name, &bytes).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
+    let session = app.create_session(&name, &bytes, bar_replay.as_deref()).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
     crate::log(&format!("session {} created from {:?}", session.id, session.read(|st| st.replay.file_name.clone())));
     tokio::spawn(prepare(app.clone(), session.clone()));
+    // Hands the game to the stats service in the background (DESIGN §4.1).
+    crate::timeline::ensure(&app, &session, false, true);
     Ok(Json(Created { id: session.id.clone() }))
 }
 
@@ -204,6 +238,7 @@ async fn start_session(State(app): Shared, Path(id): Path<String>) -> ApiResult<
             // was in an earlier run must be able to tell this one apart.
             st.run = (st.run + 1).max(crate::state::unix_now() as u32);
             st.runner = Some(tx);
+            st.jump = None;
             Ok(Some(rx))
         }
     })?;
@@ -266,6 +301,7 @@ async fn join_session(State(app): Shared, Path(id): Path<String>, Json(req): Jso
     let (viewer_id, name) = session
         .join(&req.name, req.playing_as.as_deref())
         .ok_or_else(|| ApiErr(StatusCode::TOO_MANY_REQUESTS, "this watch party is full".into()))?;
+    crate::timeline::ensure(&app, &session, false, false);
     Ok(Json(JoinResponse { viewer_id, name, session: view(&app, &session) }))
 }
 

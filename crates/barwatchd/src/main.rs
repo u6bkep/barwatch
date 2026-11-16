@@ -12,6 +12,8 @@ mod http;
 mod runner;
 mod source;
 mod state;
+mod stats_client;
+mod timeline;
 
 use anyhow::{Context, Result};
 use barwatch_core::api::Phase;
@@ -48,6 +50,14 @@ struct Args {
     /// Where the pages send people for the desktop app.
     #[arg(long, env = "BARWATCH_DOWNLOAD_URL", default_value = "https://github.com/u6bkep/barwatch/releases/latest")]
     download_url: String,
+    /// Base address of the stats service (bar-replays), e.g. http://bar-replays:8770/.
+    /// Unset: no statistics timeline.
+    #[arg(long, env = "BARWATCH_STATS_URL")]
+    stats_url: Option<String>,
+    /// A `client` token of the stats service. Prefer the environment variable: a
+    /// command-line flag is visible to every user of the machine.
+    #[arg(long, env = "BARWATCH_STATS_TOKEN", hide_env_values = true)]
+    stats_token: Option<String>,
 }
 
 fn parse_ports(s: &str) -> Result<std::ops::RangeInclusive<u16>, String> {
@@ -79,8 +89,19 @@ async fn main() -> Result<()> {
         max_upload: args.max_upload_mb << 20,
         session_days: args.session_days,
         download_url: args.download_url,
+        archive: source::Archive::default(),
     };
-    let app = Arc::new(App::new(cfg, barwatch_core::http_client()?)?);
+    let stats = match (args.stats_url.as_deref().filter(|u| !u.trim().is_empty()), args.stats_token.as_deref()) {
+        (None, _) => None,
+        (Some(_), None) => anyhow::bail!("BARWATCH_STATS_URL is set but BARWATCH_STATS_TOKEN is not"),
+        (Some(url), Some(token)) => Some(stats_client::StatsClient::new(url, token).context("BARWATCH_STATS_URL / BARWATCH_STATS_TOKEN")?),
+    };
+    match &stats {
+        Some(c) => log(&format!("stats service at {}", c.base())),
+        None => log("no stats service configured; parties have no statistics timeline"),
+    }
+    let stats = timeline::Service::new(stats, timeline::Tuning::default());
+    let app = Arc::new(App::new(cfg, barwatch_core::http_client()?, stats)?);
 
     tokio::spawn(load_maps(app.clone()));
     tokio::spawn(housekeeping(app.clone()));
@@ -132,12 +153,17 @@ async fn housekeeping(app: Arc<App>) {
         let limit = state::unix_now().saturating_sub(app.cfg.session_days * 24 * 3600);
         for session in app.sessions() {
             session.expire_viewers();
+            // Viewers count as demand for the statistics (DESIGN §4.1).
+            if session.read(|st| !st.viewers.is_empty() || !st.in_game.is_empty()) {
+                timeline::ensure(&app, &session, false, false);
+            }
             let (created, phase) = session.read(|st| (st.created_unix, st.phase));
             if created < limit && matches!(phase, Phase::Idle | Phase::Failed) {
                 log(&format!("session {} expired", session.id));
                 app.remove_session(&session.id);
             }
         }
+        timeline::evict(&app);
     }
 }
 

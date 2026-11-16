@@ -2,7 +2,7 @@
 
 use crate::runner::RunnerCmd;
 use anyhow::{Context, Result};
-use barwatch_core::api::{Phase, ReplayInfo, SessionView, ViewerState, ViewerView};
+use barwatch_core::api::{JumpView, Phase, ReplayInfo, SessionView, ViewerState, ViewerView};
 use barwatch_core::demo::Demo;
 use barwatch_core::maps::MapIndex;
 use barwatch_core::names;
@@ -29,11 +29,15 @@ pub struct Config {
     pub max_upload: usize,
     pub session_days: u64,
     pub download_url: String,
+    /// BAR's replay archive, for parties made from a link or id.
+    pub archive: crate::source::Archive,
 }
 
 pub struct App {
     pub cfg: Config,
     pub http: reqwest::Client,
+    /// The stats service, if one is configured, and what follows it.
+    pub stats: crate::timeline::Service,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     tokens: Mutex<Vec<Token>>,
     free_ports: Mutex<BTreeSet<u16>>,
@@ -64,7 +68,7 @@ pub fn random_id(len: usize) -> String {
 }
 
 impl App {
-    pub fn new(cfg: Config, http: reqwest::Client) -> Result<App> {
+    pub fn new(cfg: Config, http: reqwest::Client, stats: crate::timeline::Service) -> Result<App> {
         for sub in ["engines", "sessions", "run", "cache"] {
             let dir = cfg.data.join(sub);
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -77,6 +81,7 @@ impl App {
         let app = App {
             cfg,
             http,
+            stats,
             sessions: Mutex::new(HashMap::new()),
             tokens: Mutex::new(tokens),
             free_ports: Mutex::new(free_ports),
@@ -121,8 +126,9 @@ impl App {
         all
     }
 
-    /// Stores an uploaded replay as a new session in phase `Preparing`.
-    pub fn create_session(&self, file_name: &str, bytes: &[u8]) -> Result<Arc<Session>> {
+    /// Stores a replay as a new session in phase `Preparing`. `bar_replay` is the id
+    /// it was fetched by from BAR's archive; `None` for an upload.
+    pub fn create_session(&self, file_name: &str, bytes: &[u8], bar_replay: Option<&str>) -> Result<Arc<Session>> {
         let demo = Demo::from_gz_bytes(bytes).context("this is not a readable replay")?;
         anyhow::ensure!(names::valid_engine_version(&demo.engine_version), "replay names an odd engine version");
         let map = demo.map().context("replay does not name a map")?;
@@ -133,16 +139,26 @@ impl App {
         let dir = self.cfg.data.join("sessions").join(&id);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("replay.sdfz"), bytes)?;
-        let meta = Meta { id: id.clone(), created_unix: unix_now(), replay };
+        let meta = Meta {
+            id: id.clone(),
+            created_unix: unix_now(),
+            replay,
+            game_id: None,
+            bar_replay: bar_replay.map(str::to_owned),
+        };
         std::fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
-        let session = Arc::new(Session::new(meta, dir, demo, Phase::Preparing));
+        let header_game_id = barwatch_core::demo::game_id_from_gz(bytes);
+        let session = Arc::new(Session::new(meta, dir, demo, header_game_id, Phase::Preparing));
         self.sessions.lock().unwrap().insert(id, session.clone());
         Ok(session)
     }
 
     /// Forgets a session and deletes its files. The caller stops its server first.
     pub fn remove_session(&self, id: &str) {
-        if let Some(s) = self.sessions.lock().unwrap().remove(id) {
+        let removed = self.sessions.lock().unwrap().remove(id);
+        if let Some(s) = removed {
+            // From here on nothing writes into the session's directory.
+            s.touch(|st| st.closed = true);
             let _ = std::fs::remove_dir_all(&s.dir);
             let _ = std::fs::remove_dir_all(self.run_dir(id));
         }
@@ -224,6 +240,12 @@ struct Meta {
     id: String,
     created_unix: u64,
     replay: ReplayInfo,
+    /// The game's id at the stats service, once it has taken the game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_id: Option<String>,
+    /// The BAR replay id the party was made from; absent for an upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bar_replay: Option<String>,
 }
 
 pub struct Viewer {
@@ -251,22 +273,39 @@ pub struct State {
     pub in_game: BTreeMap<u8, String>,
     /// Command channel of the task that owns the hosting server, while one runs.
     pub runner: Option<mpsc::UnboundedSender<RunnerCmd>>,
+    /// The game's id at the stats service.
+    pub game_id: Option<String>,
+    /// The last jump issued in this run.
+    pub jump: Option<JumpView>,
+    /// The session was removed; its directory is gone or going.
+    pub closed: bool,
 }
 
 pub struct Session {
     pub id: String,
     pub dir: PathBuf,
     pub demo: Demo,
+    /// The game id in the replay's header.
+    pub header_game_id: Option<String>,
+    /// See [`Meta::bar_replay`].
+    pub bar_replay: Option<String>,
+    /// The party's statistics.
+    pub stats: crate::timeline::Slot,
     state: Mutex<State>,
     rev: watch::Sender<u64>,
 }
 
 impl Session {
-    fn new(meta: Meta, dir: PathBuf, demo: Demo, phase: Phase) -> Session {
+    fn new(meta: Meta, dir: PathBuf, demo: Demo, header_game_id: Option<String>, phase: Phase) -> Session {
+        // A stored id that is not the header's (an older daemon, a hand edit) is not used.
+        let game_id = meta.game_id.filter(|g| Some(g) == header_game_id.as_ref());
         Session {
             id: meta.id,
             dir,
             demo,
+            header_game_id,
+            bar_replay: meta.bar_replay,
+            stats: crate::timeline::Slot::new(game_id.clone()),
             state: Mutex::new(State {
                 rev: 1,
                 created_unix: meta.created_unix,
@@ -281,6 +320,9 @@ impl Session {
                 viewers: Vec::new(),
                 in_game: BTreeMap::new(),
                 runner: None,
+                game_id,
+                jump: None,
+                closed: false,
             }),
             rev: watch::channel(1).0,
         }
@@ -290,8 +332,38 @@ impl Session {
         let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?).context("parsing meta.json")?;
         anyhow::ensure!(names::valid_id(&meta.id), "malformed session id");
         let demo = Demo::read(&dir.join("replay.sdfz"))?;
+        let header_game_id = barwatch_core::demo::read_game_id(&dir.join("replay.sdfz"));
         // The engine is checked again when the session is started.
-        Ok(Session::new(meta, dir.to_path_buf(), demo, Phase::Idle))
+        Ok(Session::new(meta, dir.to_path_buf(), demo, header_game_id, Phase::Idle))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.read(|st| st.closed)
+    }
+
+    /// Records the stats service's id for the game, in memory and on disk.
+    pub fn set_game_id(&self, game_id: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if st.closed || st.game_id.as_deref() == Some(game_id) {
+            return Ok(());
+        }
+        st.game_id = Some(game_id.to_owned());
+        st.rev += 1;
+        self.rev.send_replace(st.rev);
+        let meta = Meta {
+            id: self.id.clone(),
+            created_unix: st.created_unix,
+            replay: st.replay.clone(),
+            game_id: st.game_id.clone(),
+            bar_replay: self.bar_replay.clone(),
+        };
+        // Written under the lock, which `App::remove_session` takes before it
+        // deletes the directory: a removed session's directory is never recreated.
+        let path = self.dir.join("meta.json");
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&meta)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
     }
 
     pub fn replay_path(&self) -> PathBuf {
@@ -356,8 +428,8 @@ impl Session {
             speed: st.speed,
             ended: st.ended,
             viewers,
-            game_id: None,
-            jump: None,
+            game_id: st.game_id.clone(),
+            jump: st.jump,
         }
     }
 
