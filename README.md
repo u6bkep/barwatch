@@ -78,6 +78,8 @@ docker compose up -d
 | replays, engines, state | `/data` | `BARWATCH_DATA` |
 | largest replay accepted | 256 MiB | `BARWATCH_MAX_UPLOAD_MB` |
 | parties are deleted after | 14 days | `BARWATCH_SESSION_DAYS` |
+| stats service for the statistics timeline (bar-replays) | none | `BARWATCH_STATS_URL` |
+| its `client` token | none | `BARWATCH_STATS_TOKEN` |
 
 **The daemon has no login of its own.** The intended setup:
 
@@ -138,6 +140,12 @@ cargo test --workspace
 cargo run -p barwatchd -- --data ./data --listen 127.0.0.1:8780
 cargo run -p barwatch -- join http://127.0.0.1:8780/app/join/<id> --headless --data-dir <scratch>
 ```
+
+`cargo run -p barwatchd --example fake_stats -- --output <actions.jsonl> --replay
+<game.sdfz> --rate 30` is a stand-in stats service that plays a raw output file as a
+simulation would (its flags, including ways to misbehave, are in
+`crates/barwatchd/examples/fake_stats/main.rs`); point `BARWATCH_STATS_URL` at it
+with `BARWATCH_STATS_TOKEN=fake-token`.
 
 `join --headless` runs the session client without a window and the engine without
 graphics, which is how the sync tests were done. Point `--data-dir` at a scratch

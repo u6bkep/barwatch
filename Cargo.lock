@@ -630,6 +630,7 @@ dependencies = [
  "futures-util",
  "rand 0.9.5",
  "reqwest",
+ "ruzstd",
  "serde",
  "serde_json",
  "tokio",

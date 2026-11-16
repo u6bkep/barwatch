@@ -196,6 +196,33 @@ impl Demo {
     }
 }
 
+/// The game's id from a replay's header, in lowercase hex: the 16 bytes the hosting
+/// server minted at game start, which are also the replay's id on BAR's site and
+/// the game's id at the stats service. `None` if this is not a version 5 replay or
+/// the id is all zeros. `data` is the `.sdfz` file (gzip); only its head is read.
+pub fn game_id_from_gz(data: &[u8]) -> Option<String> {
+    game_id_from_reader(flate2::read::GzDecoder::new(data))
+}
+
+/// [`game_id_from_gz`] for a file.
+pub fn read_game_id(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    game_id_from_reader(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
+}
+
+fn game_id_from_reader(mut r: impl Read) -> Option<String> {
+    let mut head = [0u8; 296];
+    r.read_exact(&mut head).ok()?;
+    if cstr(&head[0..16]) != "spring demofile" || i32::from_le_bytes(head[16..20].try_into().unwrap()) != 5 {
+        return None;
+    }
+    let id = &head[280..296];
+    if id.iter().all(|&b| b == 0) {
+        return None;
+    }
+    Some(id.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn cstr(b: &[u8]) -> String {
     String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or(&[])).into_owned()
 }
@@ -364,6 +391,23 @@ hostip=1.2.3.4;\nhostport=8452;\nishost=1;\nmyplayername=Host;\ngametype=Some Ga
         assert_eq!(demo.game_data.setup_text, SETUP);
         assert_eq!(demo.game_data.random_seed, 668_500_579);
         assert_eq!(demo.game_data.map_hash, [0xab; 64]);
+    }
+
+    #[test]
+    fn game_id_from_the_header() {
+        let gz = |raw: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(raw).unwrap();
+            e.finish().unwrap()
+        };
+        let mut raw = fake_demo_bytes();
+        assert_eq!(game_id_from_gz(&gz(&raw)), None, "all zeros is no id");
+        raw[280..296].copy_from_slice(&[0xcc, 0x40, 0xf9, 0x6a, 0x27, 0x93, 0x76, 0x5a, 0x13, 0xa5, 0x82, 0xda, 0x36, 0x64, 0x28, 0x40]);
+        assert_eq!(game_id_from_gz(&gz(&raw)).as_deref(), Some("cc40f96a2793765a13a582da36642840"));
+        assert_eq!(game_id_from_gz(&gz(&raw[..200])), None);
+        assert_eq!(game_id_from_gz(b"not gzip"), None);
+        raw[0] = b'x';
+        assert_eq!(game_id_from_gz(&gz(&raw)), None);
     }
 
     #[test]

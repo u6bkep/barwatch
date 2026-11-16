@@ -19,3 +19,7 @@ url.workspace = true
 clap.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
 rand = "0.9"
+
+[dev-dependencies]
+# The fake stats service (examples/fake_stats) reads `.jsonl.zst` outputs.
+ruzstd = "0.8"

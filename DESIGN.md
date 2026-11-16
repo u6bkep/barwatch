@@ -192,6 +192,45 @@ exist in `barwatch-core::api`; barwatchd fills them in T4b.
 `/?replay=<id>` opens the page with that replay preselected (the stats console links
 here, "Watch together"). No timeline on the web page for now.
 
+### 4.5 As built (T4b, 2026-11-15)
+
+`crates/barwatchd/src/stats_client.rs` (the calls), `timeline.rs` (registering,
+following, the timeline call), `examples/fake_stats` (a stand-in service, also used by
+the tests in `src/stats_tests.rs`). Choices this section did not dictate:
+- `BARWATCH_STATS_URL` without `BARWATCH_STATS_TOKEN` refuses to start.
+- A link or id party registers by game id and falls back to uploading the file when
+  the service cannot find it. The `game_id` the service answers with must be the one
+  in the replay's header. Registration retries with backoff (up to 5 min) for an hour
+  after creation, then only while someone wants the timeline.
+- The replay through the mirror has 30 s before barwatchd downloads it itself, and must
+  carry the requested game id in its header.
+- Demand for following is a registered viewer, an engine in the game, or a timeline
+  request in the last 90 s; following stops 60 s after the last. At most 16 parties
+  follow at once (the rest are `unavailable`, "waiting for a turn"); a turn is held
+  with the builder, and a party that can read nothing (its game failed, the service
+  has no record stream or refuses the token) gives it up and tries again after 30 s,
+  5 min and 5 min. While a party waits like that nobody asks the service about it, so
+  a service that goes away is noticed only at the next try. An unfinished
+  document is dropped when following stops and read again from the start; complete
+  ones are kept, 64 MiB in all, least recently used dropped first.
+- Untrusted stream: nothing for 30 s drops and resumes the connection; one game's
+  stream may not exceed 512 MiB; lines over 1 MiB are skipped; JSON answers over
+  64 KiB are refused; the service's words are cleaned before they reach a note.
+- `state`: `unavailable` (no service; unreachable for 10 s; token refused; replay
+  without a game id; the record call answers 404 although the game is known, as on
+  bar-replays before §9.8, asked again every 5 min; no turn free), `queued`
+  (`selected`, `fetched`, `provisioned`, or not yet heard), `building` (`simulating`,
+  or `simulated`/`ingested` while the stream is still being read), `complete` (the
+  stream's `_cursor` said so), `failed` (`failed`/`skipped` with the service's error,
+  the service refused the replay, or the stream broke a limit). The document is kept
+  through `unavailable` and `failed`, except after a stream that broke a limit.
+- `jump.target_s` of a relative skip is estimated from unpaused time at the speed the
+  daemon set, counted from the pre-game skip (the engine reports no position); it is
+  capped at the replay's length. A skip behind the last target of the run (which the
+  engine ignores) leaves `jump` as it was.
+- `/?replay=<32 hex digits>` fills the link field and asks for a press of Fetch; it
+  never creates a party by itself. Anything else in the parameter is ignored.
+
 ## 5. Desktop app
 
 ### 5.1 What exists (prototype)

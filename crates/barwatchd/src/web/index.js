@@ -159,3 +159,16 @@ refreshList();
 refreshTokens();
 setInterval(refreshList, 10000);
 if (location.hash.length > 1) open(location.hash.slice(1));
+
+// `/?replay=<id>` (the stats service's "Watch together" link): that replay is
+// preselected in the form; the party is made when someone presses Fetch. Anything
+// but a plain replay id is ignored.
+{
+  const wanted = new URLSearchParams(location.search).get("replay");
+  if (wanted && /^[0-9a-fA-F]{32}$/.test(wanted)) {
+    $("bar-link").value = wanted.toLowerCase();
+    $("create").scrollIntoView({ block: "start" });
+    $("bar-form").querySelector("button").focus();
+    toast("Replay selected. Press Fetch to start a watch party for it.");
+  }
+}
