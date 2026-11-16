@@ -15,7 +15,7 @@ use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const SCENES: [&str; 24] = [
+pub const SCENES: [&str; 25] = [
     "empty",
     "preparing",
     "ready",
@@ -36,6 +36,7 @@ pub const SCENES: [&str; 24] = [
     "timeline-stopped",
     "timeline-outage",
     "timeline-jump",
+    "timeline-ahead",
     "timeline-silent",
     "timeline-loading",
     "timeline-catching-up",
@@ -377,6 +378,13 @@ pub fn scene(name: &str) -> Option<Ui> {
                 session.jump = Some(JumpView { target_s: 840, at_unix: 1_791_428_400 });
             }
             ui.fixture_update(update);
+        }
+        // The viewer looks ahead of the game: the jump button rides the cursor.
+        "timeline-ahead" => {
+            ui.fixture_party(server, watching(false, at(76), view(TimelineState::Complete, None, Some(duel))));
+            if let Some(timeline) = ui.fixture_timeline() {
+                timeline.fixture_cursor(240.0);
+            }
         }
         // The game has not said where it is for a while (user widgets off in BAR).
         "timeline-silent" => {

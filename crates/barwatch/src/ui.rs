@@ -840,7 +840,12 @@ impl Ui {
         if let Some(session) = &update.session {
             sections.push(viewers_card(session, &update.name));
         }
-        scroll(sections).key("party-scroll").gap(tokens::SPACE_4).fill_height()
+        // Air between the content's right edge and the scrollbar's lane.
+        scroll(sections)
+            .key("party-scroll")
+            .gap(tokens::SPACE_4)
+            .padding(Sides { right: tokens::SPACE_2, ..Sides::zero() })
+            .fill_height()
     }
 
     /// What is being watched, in one line: the map's picture, the map and

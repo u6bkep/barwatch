@@ -254,7 +254,7 @@ Layout, as built: labels and readouts in a left column; to the right, tracks on 
 axis (time ruler, an event lane per side, a lead strip with lead-change marks and fight
 heat, one large chart, a compact row per metric with a tug-of-war bar). Game line,
 cursor line and a fog over the unplayed part are drawn once across all tracks. The jump
-button rides the cursor. "By player" turns the large chart's side panel into a ranked
+button rides the cursor (below the ruler since §5.9). "By player" turns the large chart's side panel into a ranked
 list; picking a player thickens their line. With the future hidden, the axis reaches
 only a rounded step beyond the game position, and every smoothed value uses past
 samples only. States exist for: before the start, game over, a jump in flight,
@@ -494,6 +494,22 @@ revisit with real games.
   bound on the party's position; it is rare (a jump before someone joins) and lines
   that run past a game line still at the start read as a fault. REJECTED: sending the
   server's `GameClock` estimate; it can run ahead of the party and give the future away.
+- **Layout.** Marker badges keep 6 px from both ends of the axis (where the game line
+  stands at game over and covered the last badge's count) and are gathered into
+  clusters where they are drawn, so one pulled in from an end shares its neighbour's
+  badge instead of landing on it; the count and the corner sign stand out of the
+  frame only as far as the badge's box. The party view's content keeps 8 px from the
+  scrollbar's lane. The chips on the ruler are as wide as their words measure
+  (`layout_text_with_family`, as the renderer sets them), not estimated: tick labels
+  give way to exactly what covers them. The jump button no longer rides the ruler: the
+  cursor keeps its amber time chip there like any cursor, and the button hangs from
+  the cursor just below the ruler, where it hides no tick label (it took the labels
+  of one or two ticks with it before). A jump only goes past the game, and with the
+  future hidden the lanes past the game are empty; with it shown, the button can
+  cover a badge of the first lane near the cursor. REJECTED: shortening the button's
+  words ("Jump to 4:00"), which hides fewer labels but drops "everyone", the point of
+  the button; moving it into the header beside "Follow the game", which has no room
+  for it in a narrow window and parts it from the cursor.
 
 ## 6. Testing
 

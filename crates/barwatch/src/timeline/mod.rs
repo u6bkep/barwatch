@@ -73,6 +73,12 @@ const ROW_H: f32 = 34.0;
 /// The line under the rows that opens the list in full.
 const MORE_H: f32 = 30.0;
 const BADGE: f32 = 26.0;
+/// The box a badge is laid out in: the frame, and the corner sign and count
+/// that stand out of it.
+const BADGE_BOX: f32 = BADGE + 4.0;
+/// How far a badge keeps from either end of the axis, px: clear of a
+/// position line standing there (the game line at game over).
+const BADGE_END_CLEAR: f32 = 6.0;
 /// The column of labels and readouts left of the tracks. Wide enough for a
 /// row to name its metric in full beside its numbers ("Build power in use"):
 /// a name cut short is a row nobody can read.
@@ -110,6 +116,9 @@ const LOADING_GRACE: Duration = Duration::from_secs(30);
 /// Without a game position there is no telling when a jump has arrived: it is
 /// shown for this long (a real engine caught up four minutes in under five seconds).
 const BLIND_JUMP_SHOWN: Duration = Duration::from_secs(8);
+/// Padding either side of the words on a chip on the ruler, and on the jump button.
+const CHIP_PAD: f32 = 7.0;
+const CHIP_PAD_JUMP: f32 = 8.0;
 /// The game's time on its chip while it has not said where it is.
 const UNKNOWN_CLOCK: &str = "–:––";
 /// Statistics this far behind the game are worth a word in the header.
@@ -148,6 +157,11 @@ enum ChipKind {
 }
 
 impl Chip {
+    /// It sits on the ruler's row, where tick labels give way to it.
+    fn on_ruler(&self) -> bool {
+        !matches!(self.what, ChipKind::Jump(_))
+    }
+
     /// The pixels it covers along an axis `w` wide, flipped at the edges as
     /// [`Place::Tag`] flips it.
     fn span(&self, w: f32) -> (f32, f32) {
@@ -528,6 +542,11 @@ impl Timeline {
     /// For canned scenes: the view by player.
     pub fn fixture_by_player(&mut self) {
         self.per_player = true;
+    }
+
+    /// For canned scenes: the cursor at `t`.
+    pub fn fixture_cursor(&mut self, t: f32) {
+        self.cursor = Some(t);
     }
 
     /// For canned scenes: as if the game had been silent for this long.
@@ -1304,7 +1323,7 @@ impl Timeline {
     fn ruler(&self, f: &Frame) -> El {
         let mut items = Vec::new();
         // Tick labels give way to the position chips riding the same row.
-        let chips: Vec<(f32, f32)> = self.chips(f).iter().map(|c| c.span(f.w)).collect();
+        let chips: Vec<(f32, f32)> = self.chips(f).iter().filter(|c| c.on_ruler()).map(|c| c.span(f.w)).collect();
         for tick in axis::ticks(f.end_s, f.w, &chips) {
             let at = frac(tick.t, f.end_s);
             if tick.labelled {
@@ -1341,8 +1360,17 @@ impl Timeline {
         let d = &self.data;
         let lanes = self.lanes();
         let h = self.lanes_height();
-        let min_gap_s = (BADGE + 4.0) / f.w * f.end_s;
+        let min_gap_s = BADGE_BOX / f.w * f.end_s;
         let sample = d.markers.iter().any(|m| m.sample);
+        // Badges stay inside the axis and off its ends, where a position line
+        // may stand (the game line at game over): gathered where they will be
+        // drawn, so that one pulled in from an end does not land on its neighbour.
+        let reach_s = (BADGE_BOX / 2.0 + BADGE_END_CLEAR) / f.w * f.end_s;
+        let drawn: Vec<Marker> = d
+            .markers
+            .iter()
+            .map(|m| Marker { t: m.t.clamp(reach_s, (f.end_s - reach_s).max(reach_s)), ..m.clone() })
+            .collect();
         let mut items = Vec::new();
         let mut labels = Vec::new();
         for lane in 0..lanes {
@@ -1352,11 +1380,12 @@ impl Timeline {
                     (lanes == 1 || d.teams[m.team].side == lane) && self.marker_visible(m) && m.t <= f.end_s
                 })
                 .collect();
-            for c in cluster(&d.markers, &members, min_gap_s) {
+            for c in cluster(&drawn, &members, min_gap_s) {
                 let top = lane as f32 * LANE_H + (LANE_H - BADGE) / 2.0 + 2.0;
+                let unplayed = !self.free && d.markers[c.members[0]].t > self.game_s;
                 items.push((
-                    Place::Tag { at: frac(c.t, f.end_s), w: Some(BADGE + 4.0), h: BADGE + 2.0, top, anchor: Anchor::Center },
-                    self.badge(f, &c.members, !self.free && c.t > self.game_s),
+                    Place::Tag { at: frac(c.t, f.end_s), w: Some(BADGE_BOX), h: BADGE + 2.0, top, anchor: Anchor::Center },
+                    self.badge(f, &c.members, unplayed),
                 ));
             }
             let (name, color) = if lanes == 1 {
@@ -1463,17 +1492,19 @@ impl Timeline {
         // Under the pointer it steps forward: a click takes the cursor there.
         let hot = f.is_hovered(&key);
         El::new(Kind::Custom("tl_badge"))
-            .width(Size::Fixed(BADGE + 4.0))
+            .width(Size::Fixed(BADGE_BOX))
             .height(Size::Fixed(BADGE + 2.0))
             .children(kids)
             .layout(move |cx| {
+                // The frame in the middle; the sign and the count stand out of
+                // its corners as far as the box's sides and no further.
                 let c = cx.container;
                 let mut out = vec![Rect::new(c.x + 2.0, c.y + 1.0, BADGE, BADGE)];
                 if with_sign {
-                    out.push(Rect::new(c.x + 2.0 + BADGE - 8.0, c.y + 1.0 + BADGE - 8.0, 11.0, 11.0));
+                    out.push(Rect::new(c.x + BADGE_BOX - 11.0, c.y + 1.0 + BADGE - 8.0, 11.0, 11.0));
                 }
                 if layout_extra {
-                    out.push(Rect::new(c.x + BADGE + 6.0 - count_w, c.y - 3.0, count_w, 11.0));
+                    out.push(Rect::new(c.x + BADGE_BOX - count_w, c.y - 3.0, count_w, 11.0));
                 }
                 out
             })
@@ -2338,9 +2369,10 @@ impl Timeline {
         Some((el, h))
     }
 
-    /// Time chips on the ruler, riding the position lines: the game's in white,
-    /// the cursor's in amber, and the jump button at the cursor itself.
-    /// Which chips ride the ruler, where, and how wide they are about to be.
+    /// Which chips ride the position lines, where, and how wide they draw:
+    /// on the ruler, the game's in white, the cursor's in amber, the moment
+    /// under the pointer; and the jump button, which hangs from the cursor
+    /// just below the ruler ([`Chip::on_ruler`]).
     fn chips(&self, f: &Frame) -> Vec<Chip> {
         let g = frac(self.game_s, f.end_s);
         let ahead = self.cursor.is_some_and(|c| c > self.game_s);
@@ -2349,35 +2381,28 @@ impl Timeline {
             (true, true) => Anchor::Before,
             (true, false) => Anchor::After,
         };
-        // About how wide a time chip draws: "25:00", or "1:02:05" past the hour.
-        let chip_w = |t: f32| if t >= 3600.0 { 66.0 } else { 50.0 };
+        let chip = |at: f32, anchor: Anchor, what: ChipKind| Chip { at, anchor, width: self.chip_width(&what), what };
         let mut out = Vec::new();
         if !self.free {
-            out.push(Chip { at: g, anchor: game_anchor, width: chip_w(self.game_s), what: ChipKind::Game });
+            out.push(chip(g, game_anchor, ChipKind::Game));
         }
         if let Some(target) = self.jump {
-            out.push(Chip { at: frac(target, f.end_s), anchor: Anchor::After, width: 128.0, what: ChipKind::Jumping(target) });
+            out.push(chip(frac(target, f.end_s), Anchor::After, ChipKind::Jumping(target)));
         }
         // While a jump is under way the cursor may still look elsewhere.
         if let Some(c) = self.cursor.filter(|c| !self.jumping_near(*c)) {
             let at = frac(c, f.end_s);
+            out.push(chip(at, if ahead { Anchor::After } else { Anchor::Before }, ChipKind::Cursor(c)));
             if self.can_jump().is_some() {
-                out.push(Chip { at, anchor: Anchor::After, width: 176.0, what: ChipKind::Jump(c) });
-            } else {
-                out.push(Chip {
-                    at,
-                    anchor: if ahead { Anchor::After } else { Anchor::Before },
-                    width: chip_w(c),
-                    what: ChipKind::Cursor(c),
-                });
+                out.push(chip(at, Anchor::After, ChipKind::Jump(c)));
             }
         }
         // The moment under the pointer, wherever it does not sit on another chip.
         if let Some(hv) = f.hover.filter(|h| !h.on_game && Some(h.t) != self.cursor) {
-            let taken: Vec<(f32, f32)> = out.iter().map(|c| c.span(f.w)).collect();
+            let taken: Vec<(f32, f32)> = out.iter().filter(|c| c.on_ruler()).map(|c| c.span(f.w)).collect();
             let chip = [Anchor::Center, Anchor::After, Anchor::Before]
                 .into_iter()
-                .map(|anchor| Chip { at: frac(hv.t, f.end_s), anchor, width: chip_w(hv.t), what: ChipKind::Hover(hv.t) })
+                .map(|anchor| chip(frac(hv.t, f.end_s), anchor, ChipKind::Hover(hv.t)))
                 .find(|c| {
                     let (a, b) = c.span(f.w);
                     taken.iter().all(|(from, to)| b + 4.0 <= *from || a - 4.0 >= *to)
@@ -2385,6 +2410,29 @@ impl Timeline {
             out.extend(chip);
         }
         out
+    }
+
+    /// The words on a chip.
+    fn chip_words(&self, what: &ChipKind) -> String {
+        match *what {
+            ChipKind::Game if !self.reported => UNKNOWN_CLOCK.into(),
+            ChipKind::Game => clock(self.game_s),
+            ChipKind::Cursor(t) | ChipKind::Hover(t) => clock(t),
+            ChipKind::Jumping(t) => format!("Jumping to {}…", clock(t)),
+            ChipKind::Jump(t) => format!("Jump everyone to {}", clock(t)),
+        }
+    }
+
+    /// How wide a chip draws, px, measured as the renderer sets its words,
+    /// so that tick labels give way to exactly what covers them.
+    fn chip_width(&self, what: &ChipKind) -> f32 {
+        let words = text_width(&self.chip_words(what), FontWeight::Semibold);
+        let (padding, icon) = match what {
+            ChipKind::Jump(_) => (CHIP_PAD_JUMP, 12.0 + tokens::SPACE_1),
+            _ => (CHIP_PAD, 0.0),
+        };
+        // A pixel either side for rounding, and the hover chip's rim.
+        (words + icon + 2.0 * padding + 2.0).ceil()
     }
 
     /// Time chips on the ruler, riding the position lines: the game's in white,
@@ -2397,40 +2445,44 @@ impl Timeline {
                 .semibold()
                 .tabular_numerals()
                 .text_color(dark)
-                .padding(Sides::xy(7.0, 2.0))
+                .padding(Sides::xy(CHIP_PAD, 2.0))
                 .fill(fill)
                 .radius(4.0)
         };
         for c in self.chips(f) {
-            let place = |h: f32, top: f32| Place::Tag { at: c.at, w: None, h, top, anchor: c.anchor };
+            // As wide as measured, so the chip covers just what the labels gave way to.
+            let place = |h: f32, top: f32| Place::Tag { at: c.at, w: Some(c.width), h, top, anchor: c.anchor };
+            let words = self.chip_words(&c.what);
             let el = match c.what {
-                ChipKind::Game => {
-                    let label = if self.reported { clock(self.game_s) } else { UNKNOWN_CLOCK.into() };
-                    (place(20.0, 4.0), chip(label, game_color()))
-                }
-                ChipKind::Cursor(t) => (place(20.0, 4.0), chip(clock(t), cursor_color())),
-                ChipKind::Hover(t) => (
+                ChipKind::Game => (place(20.0, 4.0), chip(words, game_color()).center_text()),
+                ChipKind::Cursor(_) => (place(20.0, 4.0), chip(words, cursor_color()).center_text()),
+                ChipKind::Hover(_) => (
                     place(20.0, 4.0),
-                    text(clock(t))
+                    text(words)
                         .caption()
                         .semibold()
                         .tabular_numerals()
+                        .center_text()
                         .text_color(tokens::FOREGROUND)
-                        .padding(Sides::xy(7.0, 2.0))
+                        .padding(Sides::xy(CHIP_PAD, 2.0))
                         .fill(Color::srgb_u8(39, 39, 42))
                         .stroke(Color::srgb_u8(82, 82, 91))
                         .radius(4.0),
                 ),
-                ChipKind::Jumping(t) => (place(20.0, 4.0), chip(format!("Jumping to {}…", clock(t)), cursor_color())),
-                ChipKind::Jump(t) => (
-                    place(22.0, 3.0),
+                ChipKind::Jumping(_) => (place(20.0, 4.0), chip(words, cursor_color()).center_text()),
+                // Below the ruler, where it covers none of its labels: past the
+                // game, which is all a jump can go to, the lanes are empty
+                // while the future is hidden.
+                ChipKind::Jump(_) => (
+                    place(22.0, RULER_H + 3.0),
                     row([
                         icon("fast-forward").icon_size(12.0).text_color(dark),
-                        text(format!("Jump everyone to {}", clock(t))).caption().semibold().text_color(dark),
+                        text(words).caption().semibold().tabular_numerals().text_color(dark),
                     ])
                     .gap(tokens::SPACE_1)
                     .align(Align::Center)
-                    .padding(Sides::xy(8.0, 0.0))
+                    .justify(Justify::Center)
+                    .padding(Sides::xy(CHIP_PAD_JUMP, 0.0))
                     .height(Size::Fixed(22.0))
                     // Under the pointer it brightens and gains a rim: this one acts on everyone.
                     .fill(if f.is_hovered("tl:jump") { Color::srgb_u8(255, 226, 150) } else { cursor_color() })
@@ -2520,6 +2572,13 @@ fn hover_ring(at: f32, y: f32, color: Color, r: f32) -> (Place, El) {
         Place::Tag { at, w: Some(2.0 * r), h: 2.0 * r, top: y - r, anchor: Anchor::Center },
         El::new(Kind::Custom("tl_ring")).fill(Color::srgb_u8(9, 9, 11)).stroke(color).stroke_width(1.5).radius(r),
     )
+}
+
+/// How wide `words` draw in the caption size, px.
+fn text_width(words: &str, weight: FontWeight) -> f32 {
+    damascene_core::layout_text_with_family(words, tokens::TEXT_XS.size, FontFamily::default(), weight, false, true, TextWrap::NoWrap, None)
+        .measured()
+        .width
 }
 
 /// A line of news above the tracks: an alert sign, a title, the detail
@@ -2881,10 +2940,15 @@ mod tests {
         assert_eq!(hover_chip(&t, 560.0), Some(Anchor::Before));
         assert_eq!(hover_chip(&t, 640.0), Some(Anchor::After));
         // At the left edge it is drawn inside the axis, off its line.
-        assert_eq!(t.chips(&frame(at(10.0))).last().map(|c| c.span(1200.0)), Some((0.0, 50.0)));
-        // Under the jump button (176 px right of the cursor) there is no room at all.
+        assert_eq!(t.chips(&frame(at(10.0))).last().map(|c| c.span(1200.0).0), Some(0.0));
+        // Right of a cursor that offers a jump: clear of the cursor's chip;
+        // the jump button hangs below the ruler and is in nobody's way there.
         t.cursor = Some(900.0);
-        assert_eq!(hover_chip(&t, 960.0), None);
+        let chips = t.chips(&frame(at(960.0)));
+        let span = |pick: fn(&ChipKind) -> bool| chips.iter().find(|c| pick(&c.what)).map(|c| c.span(1200.0)).unwrap();
+        let (cursor, hover) = (span(|k| matches!(k, ChipKind::Cursor(_))), span(|k| matches!(k, ChipKind::Hover(_))));
+        assert!(hover.0 >= cursor.1 + 4.0, "{cursor:?} {hover:?}");
+        assert!(chips.iter().any(|c| matches!(c.what, ChipKind::Jump(_)) && !c.on_ruler()));
         // No chip of its own on the cursor or on the game line.
         assert_eq!(hover_chip(&t, 900.0), None);
         let on_game = Some(Hover { t: 600.0, on_game: true, track: Track::Hero, y: 100.0 });
@@ -2893,12 +2957,13 @@ mod tests {
         // inside the axis, and the hover chip keeps clear of where it is drawn.
         let mut over = timeline();
         over.set_game(1200.0);
-        assert_eq!(over.chips(&frame(None))[0].span(1200.0), (1150.0, 1200.0));
+        assert_eq!(over.chips(&frame(None))[0].span(1200.0).1, 1200.0);
         assert_eq!(hover_chip(&over, 1160.0), None, "between the chip and the edge: no room");
         assert_eq!(hover_chip(&over, 1140.0), Some(Anchor::Before));
         // Whatever is on the ruler, no two chips overlap.
         for time in [0.0, 300.0, 580.0, 620.0, 880.0, 1000.0, 1190.0] {
-            let spans: Vec<(f32, f32)> = t.chips(&frame(at(time))).iter().map(|c| c.span(1200.0)).collect();
+            let spans: Vec<(f32, f32)> =
+                t.chips(&frame(at(time))).iter().filter(|c| c.on_ruler()).map(|c| c.span(1200.0)).collect();
             for (i, a) in spans.iter().enumerate() {
                 for b in &spans[i + 1..] {
                     assert!(a.1 <= b.0 || b.1 <= a.0, "chips overlap with the pointer at {time}: {spans:?}");
