@@ -198,7 +198,7 @@ impl StatsHistory {
                 .context("negative record count")?;
             let bytes =
                 count.checked_mul(RECORD_SIZE).filter(|&n| at + n <= block.len()).context("statistics block truncated")?;
-            teams.push(block[at..at + bytes].chunks_exact(RECORD_SIZE).map(TeamSample::parse).collect());
+            teams.push(block[at..at + bytes].as_chunks::<RECORD_SIZE>().0.iter().map(|r| TeamSample::parse(r)).collect());
             at += bytes;
         }
         Ok(StatsHistory { period_s: period as u32, game_time_s, teams, events })

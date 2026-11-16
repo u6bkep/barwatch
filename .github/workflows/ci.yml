@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, so a new stable release's lints cannot break the build unannounced (1.100
+      # added clippy::chunks_exact_to_as_chunks). Raise it deliberately.
+      - uses: dtolnay/rust-toolchain@1.96
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
