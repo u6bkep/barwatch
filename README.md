@@ -21,10 +21,11 @@ Two parts:
      choose *More info*, then *Run anyway*. The app copies itself to
      `%LOCALAPPDATA%\Programs\barwatch` and registers `barwatch://` links, so the
      download can be deleted afterwards.
-   - **Arch Linux:**
+   - **Arch Linux:** [`barwatch-git`](https://aur.archlinux.org/packages/barwatch-git)
+     from the AUR, with an AUR helper (`yay -S barwatch-git`) or by hand:
      ```
-     git clone https://github.com/u6bkep/barwatch
-     cd barwatch/packaging/arch && makepkg -si
+     git clone https://aur.archlinux.org/barwatch-git.git
+     cd barwatch-git && makepkg -si
      ```
    - **Other Linux:** take `barwatch` from the release tarball and run it once; it
      registers the link handler for your user.
