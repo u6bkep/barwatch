@@ -672,6 +672,12 @@ replay without one is keyed by a hash of its bytes, has no statistics and is nev
 to the service (which refuses it). A replay records whether the service has confirmed it
 holds the game (`game_id` set, as `Meta::game_id` is today).
 
+A replay's record (`meta.json`: `ReplayInfo`, the BAR id, the confirmed game id) is kept
+while some room's current replay or history names it, and deleted with its file when
+none does; the file alone is what the cache rules (§9.5) keep or drop. Keys: the header's
+game id as 32 lowercase hex digits; for a replay without one, `u` and the first 31 hex
+digits of its bytes' SHA-256, which no game id can be.
+
 **Room** (`/data/rooms/<id>.json`). What is about people: id, name, `created_unix`,
 `last_used_unix`, the current replay's key (none in a new room), and the history: up to
 50 entries of key and when the room started it, newest first. In memory only, as now:
@@ -685,9 +691,12 @@ the engine is there.
 
 Viewers: a viewer's report names the replay key it is about, so a room never shows
 someone as ready for the replay it had before. Names: a member's name is unique among
-the room's members; the name its engine uses is worked out for each replay (unique
-against that replay's players too, as `Session::join` does now) and given in the room's
-view next to the member. `playing_as` keeps working as now.
+the room's members; the name its engine uses is unique against the current replay's
+players, the other members' engine names and the names in the game, as `Session::join`
+does now. It is stored with the member, given when the member joins and given afresh
+to every member when the replay changes, so it stays put while a replay is current
+(members coming and going do not move anyone else's). It is in the room's view next to
+the member. `playing_as` keeps working as now.
 
 Housekeeping: viewers expire as now; rooms do not. `BARWATCH_SESSION_DAYS` goes.
 
@@ -705,6 +714,11 @@ a file is kept while it is some room's current replay or among the last 10 entri
 some room's history, and deleted when it is neither. Older history entries without a
 file show as such and cannot be picked. This one rule (unconfirmed files are kept by
 reference, confirmed ones by the cache budget) covers both setups.
+
+Eviction and picking a replay are serialized: the cache is trimmed under the lock that
+picking takes to set a room's current replay, and fetching a file again holds that
+replay's own lock, which eviction skips a replay for. So a file is never deleted
+between a room picking it and its server reading it.
 
 On the first start of a version-2 daemon, `/data/sessions` is deleted (logged).
 
