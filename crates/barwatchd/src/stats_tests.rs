@@ -1,11 +1,13 @@
 //! The stats client and timeline follower against the fake stats service
-//! (`examples/fake_stats`), through the daemon's own HTTP surface.
+//! (`examples/fake_stats`), through the daemon's own HTTP surface: each test makes a
+//! room and has it pick the replay. The fixtures and harness are shared with
+//! `rooms_tests`.
 
 use crate::fake_service::{self as fake, Fake, Options};
 use crate::state::{App, Config};
 use crate::stats_client::StatsClient;
 use crate::timeline::{self, Tuning};
-use barwatch_core::api::{Created, SessionView, TimelineState, TimelineView};
+use barwatch_core::api::{RoomView, TimelineState, TimelineView};
 use barwatch_core::timeline::{TimelineBuilder, TimelineDoc, ACTIONS};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -13,11 +15,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const TOKEN: &str = "test-token";
-const GAME: [u8; 16] = [0x85, 0x0a, 0xd2, 0x6a, 0xd4, 0x15, 0xd6, 0x34, 0x30, 0xd3, 0x2c, 0x0e, 0x36, 0xeb, 0x21, 0xc9];
+pub(crate) const TOKEN: &str = "test-token";
+pub(crate) const GAME: [u8; 16] =
+    [0x85, 0x0a, 0xd2, 0x6a, 0xd4, 0x15, 0xd6, 0x34, 0x30, 0xd3, 0x2c, 0x0e, 0x36, 0xeb, 0x21, 0xc9];
+/// Another game, a twin of [`GAME`] at the fake service where one is needed.
+pub(crate) const GAME2: [u8; 16] = [0x11; 16];
 
-fn game_id() -> String {
-    GAME.iter().map(|b| format!("{b:02x}")).collect()
+pub(crate) fn game_id() -> String {
+    hex_id(GAME)
+}
+
+pub(crate) fn hex_id(id: [u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // -- fixtures ------------------------------------------------------------------
@@ -28,8 +37,13 @@ const SETUP: &str = "[game]\n{\n[team0]\n{\nallyteam=0;\nteamleader=0;\nside=Arm
 [ai0]\n{\nteam=1;\nname=Bot1;\nshortname=BARb;\n}\n\
 hostip=1.2.3.4;\nhostport=8452;\nishost=1;\nmyplayername=Host;\ngametype=Some Game 1.0;\nmapname=Some Map v1;\n}\n";
 
-/// A small, structurally valid replay of two teams carrying [`GAME`] as its id.
-fn synth_replay(id: [u8; 16]) -> Vec<u8> {
+/// A small, structurally valid replay of two teams carrying `id` as its game id.
+pub(crate) fn synth_replay(id: [u8; 16]) -> Vec<u8> {
+    synth_replay_with(id, SETUP)
+}
+
+/// [`synth_replay`] with another start script (other players, say).
+pub(crate) fn synth_replay_with(id: [u8; 16], setup: &str) -> Vec<u8> {
     use std::io::Write;
     let mut head = vec![0u8; 352];
     head[..15].copy_from_slice(b"spring demofile");
@@ -38,10 +52,10 @@ fn synth_replay(id: [u8; 16]) -> Vec<u8> {
     head[24..34].copy_from_slice(b"2026.07.04");
     head[280..296].copy_from_slice(&id);
     head[296..304].copy_from_slice(&1_700_000_000u64.to_le_bytes());
-    head[304..308].copy_from_slice(&(SETUP.len() as i32).to_le_bytes());
+    head[304..308].copy_from_slice(&(setup.len() as i32).to_le_bytes());
     head[312..316].copy_from_slice(&900i32.to_le_bytes());
     head[316..320].copy_from_slice(&950i32.to_le_bytes());
-    let mut z = flate2_free_zlib(SETUP.as_bytes());
+    let mut z = flate2_free_zlib(setup.as_bytes());
     let mut pkt = vec![52u8, 0, 0];
     pkt.extend_from_slice(&(z.len() as u16).to_le_bytes());
     pkt.append(&mut z);
@@ -49,7 +63,7 @@ fn synth_replay(id: [u8; 16]) -> Vec<u8> {
     pkt.extend_from_slice(&[0xcd; 64]);
     pkt.extend_from_slice(&7u32.to_le_bytes());
     let mut raw = head;
-    raw.extend_from_slice(SETUP.as_bytes());
+    raw.extend_from_slice(setup.as_bytes());
     raw.extend_from_slice(&0.0f32.to_le_bytes());
     raw.extend_from_slice(&(pkt.len() as u32).to_le_bytes());
     raw.extend_from_slice(&pkt);
@@ -125,7 +139,7 @@ fn crc32(data: &[u8]) -> u32 {
 /// noise the stream filters out, `bs_team_stats` one frame after the period
 /// carrying its own frame, a kill, a team dying, and Gex's `team_stats` batch at
 /// game over carrying the history's frames.
-fn synth_output(periods: u32) -> Vec<Vec<u8>> {
+pub(crate) fn synth_output(periods: u32) -> Vec<Vec<u8>> {
     let mut out: Vec<Value> = vec![json!({"action": "init", "frame": 0, "version": 1})];
     out.push(json!({"action": "unit_def", "frame": 0, "defID": 1, "defName": "armcom", "isCommander": true, "metalCost": 1000, "energyCost": 1000, "unitGroup": ""}));
     out.push(json!({"action": "unit_def", "frame": 0, "defID": 2, "defName": "armpw", "metalCost": 50, "energyCost": 900, "speed": 80, "unitGroup": "weapon"}));
@@ -236,7 +250,7 @@ fn same_doc(got: &TimelineDoc, want: &TimelineDoc, what: &str) {
     assert_eq!(got.marks.len(), want.marks.len(), "{what}: number of marks");
 }
 
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("barwatchd-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -245,7 +259,7 @@ fn scratch(name: &str) -> PathBuf {
 
 // -- harness -------------------------------------------------------------------
 
-fn quick() -> Tuning {
+pub(crate) fn quick() -> Tuning {
     Tuning {
         poll_demand: Duration::from_secs(5),
         linger: Duration::from_secs(1),
@@ -257,10 +271,10 @@ fn quick() -> Tuning {
     }
 }
 
-struct Daemon {
-    app: Arc<App>,
-    base: String,
-    http: reqwest::Client,
+pub(crate) struct Daemon {
+    pub(crate) app: Arc<App>,
+    pub(crate) base: String,
+    pub(crate) http: reqwest::Client,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -273,26 +287,38 @@ impl Drop for Daemon {
 impl Daemon {
     /// A daemon whose BAR archive is a port nobody listens on: tests never reach
     /// the real one.
-    async fn start(data: &Path, stats: Option<SocketAddr>, tuning: Tuning) -> Daemon {
-        let nowhere =
-            crate::source::Archive { api: "http://127.0.0.1:9/replays".into(), bucket: "http://127.0.0.1:9/BAR".into() };
-        Daemon::start_with(data, stats, tuning, nowhere).await
+    pub(crate) async fn start(data: &Path, stats: Option<SocketAddr>, tuning: Tuning) -> Daemon {
+        Daemon::start_cfg(data, stats, tuning, |_| {}).await
     }
 
     async fn start_with(data: &Path, stats: Option<SocketAddr>, tuning: Tuning, archive: crate::source::Archive) -> Daemon {
-        // The engine is "installed", so preparing a party downloads nothing.
+        Daemon::start_cfg(data, stats, tuning, |cfg| cfg.archive = archive).await
+    }
+
+    /// [`start`](Self::start) with changes to the configuration.
+    pub(crate) async fn start_cfg(
+        data: &Path,
+        stats: Option<SocketAddr>,
+        tuning: Tuning,
+        tweak: impl FnOnce(&mut Config),
+    ) -> Daemon {
+        // The engine is "installed", so preparing a room downloads nothing.
         let engine = data.join("engines").join("2026.07.04");
         std::fs::create_dir_all(&engine).unwrap();
-        std::fs::write(engine.join("spring-dedicated"), b"").unwrap();
-        let cfg = Config {
+        if !engine.join("spring-dedicated").exists() {
+            std::fs::write(engine.join("spring-dedicated"), b"").unwrap();
+        }
+        let mut cfg = Config {
             data: data.to_path_buf(),
             udp_ports: 18480..=18481,
             game_host: None,
             max_upload: 16 << 20,
-            session_days: 14,
+            replay_cache: 4096 << 20,
             download_url: "https://example.org".into(),
-            archive,
+            archive: crate::source::Archive { api: "http://127.0.0.1:9/replays".into(), bucket: "http://127.0.0.1:9/BAR".into() },
+            stats_public_url: None,
         };
+        tweak(&mut cfg);
         let client = stats.map(|a| StatsClient::new(&format!("http://{a}/"), TOKEN).unwrap());
         let app = Arc::new(App::new(cfg, reqwest::Client::new(), timeline::Service::new(client, tuning)).unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -304,29 +330,62 @@ impl Daemon {
         Daemon { app, base, http: reqwest::Client::new(), task }
     }
 
-    async fn upload(&self, replay: &[u8]) -> String {
-        let resp = self
-            .http
-            .post(format!("{}/api/sessions", self.base))
+    /// A new room (through the web page's API); its id.
+    pub(crate) async fn new_room(&self, name: &str) -> String {
+        let resp = self.http.post(format!("{}/api/rooms", self.base)).json(&json!({ "name": name })).send().await.unwrap();
+        assert!(resp.status().is_success(), "{:?}", resp.text().await);
+        resp.json::<RoomView>().await.unwrap().id
+    }
+
+    /// Has the room pick an uploaded replay.
+    pub(crate) async fn pick_file(&self, room: &str, replay: &[u8]) -> reqwest::Response {
+        self.http
+            .put(format!("{}/app/v1/rooms/{room}/replay", self.base))
             .header("x-barwatch-filename", "game.sdfz")
             .body(replay.to_vec())
             .send()
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Has the room pick a replay by JSON (`bar_replay` or `key`).
+    pub(crate) async fn pick_json(&self, room: &str, body: Value) -> reqwest::Response {
+        self.http.put(format!("{}/app/v1/rooms/{room}/replay", self.base)).json(&body).send().await.unwrap()
+    }
+
+    /// A new room playing an uploaded replay; the room's id.
+    pub(crate) async fn upload(&self, replay: &[u8]) -> String {
+        let room = self.new_room("test").await;
+        let resp = self.pick_file(&room, replay).await;
         assert!(resp.status().is_success(), "{:?}", resp.text().await);
-        resp.json::<Created>().await.unwrap().id
+        room
     }
 
-    async fn link_party(&self, link: &str) -> reqwest::Response {
-        self.http.post(format!("{}/api/sessions", self.base)).json(&json!({ "bar_replay": link })).send().await.unwrap()
+    /// A new room asked to play a BAR link or id: the room, and the answer.
+    async fn link_room(&self, link: &str) -> (String, reqwest::Response) {
+        let room = self.new_room("test").await;
+        let resp = self.pick_json(&room, json!({ "bar_replay": link })).await;
+        (room, resp)
     }
 
-    async fn session(&self, id: &str) -> SessionView {
-        self.http.get(format!("{}/app/v1/sessions/{id}", self.base)).send().await.unwrap().json().await.unwrap()
+    pub(crate) async fn room(&self, id: &str) -> RoomView {
+        let resp = self.http.get(format!("{}/app/v1/rooms/{id}", self.base)).send().await.unwrap();
+        assert!(resp.status().is_success(), "room {id}: {}", resp.status());
+        resp.json().await.unwrap()
     }
 
-    async fn timeline(&self, id: &str, rev: Option<u64>) -> TimelineView {
-        let mut url = format!("{}/app/v1/sessions/{id}/timeline", self.base);
+    /// The game id the room's current replay is confirmed under.
+    async fn game_id_of(&self, id: &str) -> Option<String> {
+        self.room(id).await.replay.and_then(|r| r.game_id)
+    }
+
+    /// The current replay of a room, from inside.
+    pub(crate) fn current(&self, id: &str) -> Arc<crate::state::Replay> {
+        self.app.room(id).unwrap().current().unwrap()
+    }
+
+    pub(crate) async fn timeline(&self, id: &str, rev: Option<u64>) -> TimelineView {
+        let mut url = format!("{}/app/v1/rooms/{id}/timeline", self.base);
         if let Some(rev) = rev {
             url.push_str(&format!("?rev={rev}&wait=2"));
         }
@@ -336,7 +395,7 @@ impl Daemon {
     }
 
     /// Follows the timeline until `done` says so; returns every view seen.
-    async fn watch(&self, id: &str, limit: Duration, done: impl Fn(&TimelineView) -> bool) -> Vec<TimelineView> {
+    pub(crate) async fn watch(&self, id: &str, limit: Duration, done: impl Fn(&TimelineView) -> bool) -> Vec<TimelineView> {
         let until = Instant::now() + limit;
         let mut seen: Vec<TimelineView> = Vec::new();
         loop {
@@ -360,7 +419,7 @@ impl Daemon {
     }
 }
 
-async fn start_fake(opts: Options, at: Option<SocketAddr>) -> (Arc<Fake>, fake::Server, SocketAddr) {
+pub(crate) async fn start_fake(opts: Options, at: Option<SocketAddr>) -> (Arc<Fake>, fake::Server, SocketAddr) {
     let fake = Fake::new(opts);
     let (server, addr) = serve_fake(&fake, at).await;
     (fake, server, addr)
@@ -372,7 +431,7 @@ async fn serve_fake(fake: &Arc<Fake>, at: Option<SocketAddr>) -> (fake::Server, 
     (fake.serve(listener), addr)
 }
 
-fn opts(lines: Vec<Vec<u8>>, replay: &[u8]) -> Options {
+pub(crate) fn opts(lines: Vec<Vec<u8>>, replay: &[u8]) -> Options {
     let mut o = Options::new(TOKEN, lines, &game_id());
     o.replay = Some(replay.to_vec());
     o.replay_name = "2026-01-01_game.sdfz".into();
@@ -381,7 +440,7 @@ fn opts(lines: Vec<Vec<u8>>, replay: &[u8]) -> Options {
     o
 }
 
-fn complete(v: &TimelineView) -> bool {
+pub(crate) fn complete(v: &TimelineView) -> bool {
     v.state == TimelineState::Complete
 }
 
@@ -397,7 +456,7 @@ fn states(seen: &[TimelineView]) -> Vec<TimelineState> {
 /// (growing, with the companion's counters during the game) → complete, equal to
 /// the document of the whole output.
 #[tokio::test(flavor = "multi_thread")]
-async fn upload_party_grows_to_complete() {
+async fn upload_grows_to_complete() {
     let dir = scratch("upload");
     let (replay, lines) = (synth_replay(GAME), synth_output(40));
     let want = reference(&replay, &lines, &dir);
@@ -409,7 +468,7 @@ async fn upload_party_grows_to_complete() {
 
     let started = Instant::now();
     let id = d.upload(&replay).await;
-    assert!(started.elapsed() < Duration::from_secs(2), "creating a party waited for the service");
+    assert!(started.elapsed() < Duration::from_secs(2), "picking a replay waited for the service");
     let seen = d.watch(&id, Duration::from_secs(30), complete).await;
 
     let st = states(&seen);
@@ -425,10 +484,11 @@ async fn upload_party_grows_to_complete() {
     assert_eq!((fake.count("upload"), fake.count("submit")), (1, 0));
     assert_eq!(fake.priorities(), ["interactive"]);
 
-    let view = d.session(&id).await;
-    assert_eq!(view.game_id.as_deref(), Some(game_id().as_str()));
+    let view = d.room(&id).await;
+    assert_eq!(view.replay.as_ref().unwrap().key, game_id());
+    assert_eq!(view.replay.unwrap().game_id.as_deref(), Some(game_id().as_str()));
     let meta: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("data/sessions").join(&id).join("meta.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(dir.join("data/replays").join(game_id()).join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["game_id"], game_id());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -436,7 +496,7 @@ async fn upload_party_grows_to_complete() {
 /// A link gets its replay through the service's mirror, registers by game id, and
 /// grows a timeline.
 #[tokio::test(flavor = "multi_thread")]
-async fn link_party_through_the_service() {
+async fn link_through_the_service() {
     let dir = scratch("link");
     let (replay, lines) = (synth_replay(GAME), synth_output(20));
     let want = reference(&replay, &lines, &dir);
@@ -445,18 +505,25 @@ async fn link_party_through_the_service() {
     let (fake, _server, addr) = start_fake(o, None).await;
     let d = Daemon::start(&dir.join("data"), Some(addr), quick()).await;
 
-    let resp = d.link_party(&format!("https://www.beyondallreason.info/replays?gameId={}", game_id().to_uppercase())).await;
+    let (id, resp) = d.link_room(&format!("https://www.beyondallreason.info/replays?gameId={}", game_id().to_uppercase())).await;
     assert!(resp.status().is_success(), "{:?}", resp.text().await);
-    let id = resp.json::<Created>().await.unwrap().id;
-    assert_eq!(std::fs::read(dir.join("data/sessions").join(&id).join("replay.sdfz")).unwrap(), replay);
-    let view = d.session(&id).await;
-    assert_eq!(view.replay.file_name, "2026-01-01_game.sdfz");
+    assert_eq!(std::fs::read(dir.join("data/replays").join(game_id()).join("replay.sdfz")).unwrap(), replay);
+    let view = d.room(&id).await;
+    assert_eq!(view.replay.unwrap().info.file_name, "2026-01-01_game.sdfz");
     let seen = d.watch(&id, Duration::from_secs(30), complete).await;
     assert!(states(&seen).contains(&TimelineState::Building));
     same_doc(seen.last().unwrap().doc.as_ref().unwrap(), &want, "final");
     assert_eq!((fake.count("replay"), fake.count("submit"), fake.count("upload")), (1, 1, 0));
     assert_eq!(fake.priorities(), ["interactive"]);
-    assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
+    assert_eq!(d.game_id_of(&id).await.as_deref(), Some(game_id().as_str()));
+
+    // Another room picking the same game shares the record, the file and the
+    // statistics: nothing is fetched or registered again.
+    let (other, resp) = d.link_room(&game_id()).await;
+    assert!(resp.status().is_success(), "{:?}", resp.text().await);
+    assert!(Arc::ptr_eq(&d.current(&id), &d.current(&other)));
+    assert!(complete(&d.timeline(&other, None).await));
+    assert_eq!((fake.count("replay"), fake.count("submit"), fake.count("upload")), (1, 1, 0));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -504,7 +571,7 @@ async fn start_archive(
 /// game's file) comes from BAR's archive directly, and a game the service cannot
 /// find by id is uploaded to it instead.
 #[tokio::test(flavor = "multi_thread")]
-async fn link_party_falls_back() {
+async fn link_falls_back() {
     let dir = scratch("fallback");
     let replay = synth_replay(GAME);
     let mut o = opts(synth_output(4), &replay);
@@ -514,23 +581,23 @@ async fn link_party_falls_back() {
     let (archive, hits, archive_task) = start_archive(&game_id(), replay.clone()).await;
     let d = Daemon::start_with(&dir.join("data"), Some(addr), quick(), archive).await;
 
-    let resp = d.link_party(&game_id()).await;
+    let (id, resp) = d.link_room(&game_id()).await;
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
-    let id = resp.json::<Created>().await.unwrap().id;
-    assert_eq!(std::fs::read(dir.join("data/sessions").join(&id).join("replay.sdfz")).unwrap(), replay);
-    assert_eq!(d.session(&id).await.replay.file_name, "2026-01-01_direct.sdfz");
+    assert_eq!(std::fs::read(dir.join("data/replays").join(game_id()).join("replay.sdfz")).unwrap(), replay);
+    assert_eq!(d.room(&id).await.replay.unwrap().info.file_name, "2026-01-01_direct.sdfz");
     assert_eq!((fake.count("replay"), hits.load(std::sync::atomic::Ordering::SeqCst)), (1, 2));
 
     let seen = d.watch(&id, Duration::from_secs(20), complete).await;
     assert!(seen.last().unwrap().doc.is_some());
     assert_eq!((fake.count("submit"), fake.count("upload")), (1, 1));
     assert_eq!(fake.priorities(), ["interactive", "interactive"]);
-    assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
+    assert_eq!(d.game_id_of(&id).await.as_deref(), Some(game_id().as_str()));
 
-    // Neither knows the id: refused, with words.
-    let resp = d.link_party(&"ab".repeat(16)).await;
+    // Neither knows the id: refused, with words, and the room still plays its replay.
+    let resp = d.pick_json(&id, json!({ "bar_replay": "ab".repeat(16) })).await;
     assert_eq!(resp.status(), 400);
     assert!(resp.text().await.unwrap().contains("does not know"));
+    assert_eq!(d.room(&id).await.replay.unwrap().key, game_id());
     archive_task.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -651,8 +718,9 @@ async fn service_goes_away_and_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// barwatchd restarts mid-game: the session keeps its game id (no new
-/// registration) and the timeline is read again and completes.
+/// barwatchd restarts mid-game: the room and its replay are still there, the replay
+/// keeps its game id (no new registration) and the timeline is read again and
+/// completes.
 #[test]
 fn daemon_restart_mid_game() {
     let dir = scratch("restart");
@@ -678,7 +746,7 @@ fn daemon_restart_mid_game() {
     let second = tokio::runtime::Runtime::new().unwrap();
     second.block_on(async {
         let d = Daemon::start(&data, Some(addr), quick()).await;
-        assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
+        assert_eq!(d.game_id_of(&id).await.as_deref(), Some(game_id().as_str()));
         let seen = d.watch(&id, Duration::from_secs(40), complete).await;
         same_doc(seen.last().unwrap().doc.as_ref().unwrap(), &want, "final");
     });
@@ -724,7 +792,7 @@ async fn service_without_records() {
         })
         .await;
     assert!(seen.last().unwrap().doc.is_none());
-    assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
+    assert_eq!(d.game_id_of(&id).await.as_deref(), Some(game_id().as_str()));
     // It asks again now and then, not in a loop.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let calls = fake.count("records");
@@ -733,17 +801,30 @@ async fn service_without_records() {
 }
 
 /// Without a service everything works as before and the timeline says why there
-/// is none; with a service that is down at creation, the party is made at once and
-/// the game is registered once the service comes up.
+/// is none; with a service that is down when a room picks the replay, the pick is
+/// done at once and the game is registered once the service comes up. A room
+/// without a replay says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_service_and_service_down() {
     let dir = scratch("down");
     let replay = synth_replay(GAME);
     let d = Daemon::start(&dir.join("none"), None, quick()).await;
+    let empty = d.new_room("empty").await;
+    let v = d.timeline(&empty, None).await;
+    assert_eq!((v.state, v.note.as_deref(), v.replay), (TimelineState::Unavailable, Some("This room has no replay yet."), None));
+    // Waits for a pick, and answers for the replay picked.
+    let replay2 = replay.clone();
+    let (waited, picked) = tokio::join!(d.timeline(&empty, Some(0)), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        d.pick_file(&empty, &replay2).await
+    });
+    assert!(picked.status().is_success());
+    assert_eq!(waited.replay.as_deref(), Some(game_id().as_str()));
     let id = d.upload(&replay).await;
     let v = d.timeline(&id, None).await;
     assert_eq!((v.state, v.note.as_deref()), (TimelineState::Unavailable, Some("This server has no statistics service.")));
-    assert_eq!(d.session(&id).await.game_id, None);
+    assert_eq!(v.replay.as_deref(), Some(game_id().as_str()));
+    assert_eq!(d.game_id_of(&id).await, None);
 
     // A port nobody listens on, for now.
     let addr = { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap() };
@@ -760,7 +841,7 @@ async fn no_service_and_service_down() {
     let seen = d.watch(&id, Duration::from_secs(30), complete).await;
     assert!(seen.last().unwrap().doc.is_some());
     assert_eq!(fake.count("upload"), 1);
-    assert_eq!(d.session(&id).await.game_id.as_deref(), Some(game_id().as_str()));
+    assert_eq!(d.game_id_of(&id).await.as_deref(), Some(game_id().as_str()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -815,14 +896,14 @@ async fn demand_and_memory() {
     let d = Daemon::start(&dir.join("data"), Some(addr), tuning).await;
     let id = d.upload(&replay).await;
     let _ = d.watch(&id, Duration::from_secs(20), |v| v.doc.is_some()).await;
-    let session = d.app.session(&id).unwrap();
+    let replay = d.current(&id);
 
     // Nobody asks: the follower stops and the unfinished document goes.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let records = fake.count("records");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(fake.count("records"), records, "still following");
-    let v: TimelineView = serde_json::from_slice(&session.stats.view_json(true).await).unwrap();
+    let v: TimelineView = serde_json::from_slice(&replay.stats.view_json(true).await).unwrap();
     assert!(v.doc.is_none());
 
     // Asked again: read from the start, to the end.
@@ -830,17 +911,17 @@ async fn demand_and_memory() {
     same_doc(seen.last().unwrap().doc.as_ref().unwrap(), &want, "final");
     // Kept while nobody asks; evicted by the (tiny) budget.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let v: TimelineView = serde_json::from_slice(&session.stats.view_json(true).await).unwrap();
+    let v: TimelineView = serde_json::from_slice(&replay.stats.view_json(true).await).unwrap();
     assert_eq!(v.state, TimelineState::Complete);
     timeline::evict(&d.app);
-    let v: TimelineView = serde_json::from_slice(&session.stats.view_json(true).await).unwrap();
+    let v: TimelineView = serde_json::from_slice(&replay.stats.view_json(true).await).unwrap();
     assert!(v.doc.is_none());
     let seen = d.watch(&id, Duration::from_secs(20), complete).await;
     same_doc(seen.last().unwrap().doc.as_ref().unwrap(), &want, "final");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// At most `max_followers` parties follow at once: the next one says it waits for a
+/// At most `max_followers` replays follow at once: the next one says it waits for a
 /// turn, and follows to the end once the first is done.
 #[tokio::test(flavor = "multi_thread")]
 async fn followers_take_turns() {
@@ -848,13 +929,14 @@ async fn followers_take_turns() {
     let (replay, lines) = (synth_replay(GAME), synth_output(40));
     let want = reference(&replay, &lines, &dir);
     let mut o = opts(lines, &replay);
+    o.twins = vec![hex_id(GAME2)];
     o.rate = Some(60.0);
     let (_fake, _server, addr) = start_fake(o, None).await;
     let tuning = Tuning { max_followers: 1, poll_demand: Duration::from_secs(60), ..quick() };
     let d = Daemon::start(&dir.join("data"), Some(addr), tuning).await;
     let a = d.upload(&replay).await;
     let _ = d.watch(&a, Duration::from_secs(20), |v| v.doc.is_some()).await;
-    let b = d.upload(&replay).await;
+    let b = d.upload(&synth_replay(GAME2)).await;
     let seen =
         d.watch(&b, Duration::from_secs(20), |v| v.note.as_deref().is_some_and(|n| n.contains("waiting for a turn"))).await;
     let waiting = seen.last().unwrap();
@@ -866,8 +948,8 @@ async fn followers_take_turns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Deleting a party while it is being followed stops the follower and leaves
-/// nothing on disk.
+/// Deleting a room while its replay is being followed (no other room names the
+/// replay) stops the follower and leaves nothing on disk.
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_while_following() {
     let dir = scratch("delete");
@@ -879,15 +961,16 @@ async fn delete_while_following() {
     let d = Daemon::start(&dir.join("data"), Some(addr), quick()).await;
     let id = d.upload(&replay).await;
     let _ = d.watch(&id, Duration::from_secs(20), |v| v.doc.is_some()).await;
-    let session = d.app.session(&id).unwrap();
-    let resp = d.http.delete(format!("{}/api/sessions/{id}", d.base)).send().await.unwrap();
+    let replay = d.current(&id);
+    let resp = d.http.delete(format!("{}/api/rooms/{id}", d.base)).send().await.unwrap();
     assert_eq!(resp.status(), 204);
     tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(session.is_closed());
-    assert!(!dir.join("data/sessions").join(&id).exists());
+    assert!(replay.is_closed());
+    assert!(!dir.join("data/replays").join(game_id()).exists());
+    assert_eq!(std::fs::read_dir(dir.join("data/rooms")).unwrap().count(), 0);
     let records = fake.count("records") + fake.count("status");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(fake.count("records") + fake.count("status"), records, "still following a deleted party");
+    assert_eq!(fake.count("records") + fake.count("status"), records, "still following a deleted room's replay");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -925,7 +1008,7 @@ async fn real_duel_fixture() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A skip fills `SessionView.jump` with its absolute target: a relative one
+/// A skip fills `RoomView.jump` with its absolute target: a relative one
 /// resolved from where the server stands, capped at the replay's end; a skip
 /// behind an earlier one (which the engine ignores) leaves it; a new run clears it.
 #[tokio::test(flavor = "multi_thread")]
@@ -935,7 +1018,7 @@ async fn jumps_are_reported() {
     let dir = scratch("jump");
     let d = Daemon::start(&dir.join("data"), None, quick()).await;
     let id = d.upload(&synth_replay(GAME)).await;
-    let session = d.app.session(&id).unwrap();
+    let room = d.app.room(&id).unwrap();
     let engine = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let link = Link::for_test(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap(), engine.local_addr().unwrap());
     let heard = || async {
@@ -943,43 +1026,43 @@ async fn jumps_are_reported() {
         let n = tokio::time::timeout(Duration::from_secs(2), engine.recv(&mut buf)).await.unwrap().unwrap();
         String::from_utf8_lossy(&buf[..n]).into_owned()
     };
-    let length = session.read(|st| st.replay.duration_s);
+    let length = d.current(&id).info().duration_s;
     assert!(length > 700, "the fixture is {length} s long");
     let mut clock = GameClock::default();
 
     // Before the pre-game skip: refused, nothing sent, no jump.
-    apply(&link, &session, Control::Skip { seconds: 60, relative: true }, false, &mut clock).await;
-    assert_eq!(d.session(&id).await.jump, None);
+    apply(&link, &room, Control::Skip { seconds: 60, relative: true }, false, &mut clock).await;
+    assert_eq!(d.room(&id).await.jump, None);
 
     clock.skipped_to(1);
     clock.advance(Duration::from_secs(30), 2.0);
     let before = crate::state::unix_now();
-    apply(&link, &session, Control::Skip { seconds: 120, relative: true }, true, &mut clock).await;
+    apply(&link, &room, Control::Skip { seconds: 120, relative: true }, true, &mut clock).await;
     assert_eq!(heard().await, "/skip +120");
-    let jump = d.session(&id).await.jump.expect("a jump");
+    let jump = d.room(&id).await.jump.expect("a jump");
     assert_eq!(jump.target_s, 181);
     assert!(jump.at_unix >= before);
 
-    apply(&link, &session, Control::Skip { seconds: 600, relative: false }, true, &mut clock).await;
+    apply(&link, &room, Control::Skip { seconds: 600, relative: false }, true, &mut clock).await;
     assert_eq!(heard().await, "/skip 600");
-    assert_eq!(d.session(&id).await.jump.map(|j| j.target_s), Some(600));
-    apply(&link, &session, Control::Skip { seconds: 300, relative: false }, true, &mut clock).await;
+    assert_eq!(d.room(&id).await.jump.map(|j| j.target_s), Some(600));
+    apply(&link, &room, Control::Skip { seconds: 300, relative: false }, true, &mut clock).await;
     assert_eq!(heard().await, "/skip 300");
-    assert_eq!(d.session(&id).await.jump.map(|j| j.target_s), Some(600), "a skip behind the last one is ignored");
-    apply(&link, &session, Control::Skip { seconds: 100_000, relative: true }, true, &mut clock).await;
-    assert_eq!(d.session(&id).await.jump.map(|j| j.target_s), Some(length));
+    assert_eq!(d.room(&id).await.jump.map(|j| j.target_s), Some(600), "a skip behind the last one is ignored");
+    apply(&link, &room, Control::Skip { seconds: 100_000, relative: true }, true, &mut clock).await;
+    assert_eq!(d.room(&id).await.jump.map(|j| j.target_s), Some(length));
 
     // A new run (which fails at once here: the engine is a stand-in).
-    let resp = d.http.post(format!("{}/api/sessions/{id}/start", d.base)).send().await.unwrap();
+    let resp = d.http.post(format!("{}/api/rooms/{id}/start", d.base)).send().await.unwrap();
     assert!(resp.status().is_success());
-    assert_eq!(resp.json::<SessionView>().await.unwrap().jump, None);
+    assert_eq!(resp.json::<RoomView>().await.unwrap().jump, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The view's JSON is `api::TimelineView`'s.
 #[tokio::test]
 async fn view_json_is_the_api_type() {
-    let slot = timeline::Slot::new(None);
+    let slot = timeline::Slot::new(&game_id(), None);
     let v: TimelineView = serde_json::from_slice(&slot.view_json(false).await).unwrap();
     assert_eq!(
         v,
@@ -987,7 +1070,8 @@ async fn view_json_is_the_api_type() {
             rev: 1,
             state: TimelineState::Unavailable,
             note: Some("This server has no statistics service.".into()),
-            doc: None
+            doc: None,
+            replay: Some(game_id()),
         }
     );
     let raw: Value = serde_json::from_slice(&slot.view_json(false).await).unwrap();
@@ -1039,7 +1123,11 @@ mod odd_services {
             );
         let d = Daemon::start(&dir.join("data"), Some(serve(router).await), quick()).await;
         let id = d.upload(&synth_replay(GAME)).await;
-        let rev = d.app.session(&id).unwrap().read(|st| st.rev);
+        // Once prepared, the room changes only when the game id is first confirmed.
+        while d.room(&id).await.phase != barwatch_core::api::Phase::Idle {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let rev = d.app.room(&id).unwrap().read(|st| st.rev);
         // Someone watches, so the follower runs and keeps hearing "unknown".
         for _ in 0..5 {
             let _ = d.timeline(&id, None).await;
@@ -1047,8 +1135,8 @@ mod odd_services {
         }
         let n = uploads.load(SeqCst);
         assert!((2..=5).contains(&n), "{n} uploads in 5 s");
-        // Taking the same id again is no change of the session.
-        assert!(d.app.session(&id).unwrap().read(|st| st.rev) <= rev + 1);
+        // Taking the same id again is no change of the room.
+        assert!(d.app.room(&id).unwrap().read(|st| st.rev) <= rev + 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1236,8 +1324,8 @@ mod odd_services {
     }
 }
 
-/// Parties that cannot read anything (here: a service without the record stream)
-/// do not hold the follower turns: with one turn, both say why, neither waits.
+/// Replays that cannot be read (here: a service without the record stream) do not
+/// hold the follower turns: with one turn, both say why, neither waits.
 #[tokio::test(flavor = "multi_thread")]
 async fn turns_are_not_held_without_a_stream() {
     let dir = scratch("turns-idle");
@@ -1250,7 +1338,7 @@ async fn turns_are_not_held_without_a_stream() {
     let d = Daemon::start(&dir.join("data"), Some(addr), tuning).await;
     let a = d.upload(&replay).await;
     let _ = d.watch(&a, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;
-    let b = d.upload(&replay).await;
+    let b = d.upload(&synth_replay(GAME2)).await;
     let _ = d.watch(&b, Duration::from_secs(10), |v| v.note.as_deref().is_some_and(|n| n.contains("newer version"))).await;
     // And they stay so: the parked ones leave the turn free.
     tokio::time::sleep(Duration::from_secs(3)).await;

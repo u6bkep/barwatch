@@ -54,6 +54,24 @@ impl std::fmt::Display for SvcError {
     }
 }
 
+/// How soon the service should work on a game it is handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    /// Someone is waiting for it: a room's replay.
+    Interactive,
+    /// Nobody is: a replay sent to the archive.
+    Batch,
+}
+
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::Interactive => "interactive",
+            Priority::Batch => "batch",
+        }
+    }
+}
+
 /// A game's status at the service (`GET /api/v1/games/{id}`), checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameStatus {
@@ -232,12 +250,12 @@ impl StatsClient {
         parse_status(&read_limited(resp, MAX_JSON).await?)
     }
 
-    /// `PUT /api/v1/replays?priority=interactive` with the replay file.
-    pub async fn upload(&self, replay: Vec<u8>) -> Result<GameStatus, SvcError> {
+    /// `PUT /api/v1/replays?priority=<priority>` with the replay file.
+    pub async fn upload(&self, replay: Vec<u8>, priority: Priority) -> Result<GameStatus, SvcError> {
         // A large replay over a slow link: at least 1 MiB/s on top of the usual wait.
         let timeout = SUBMIT_TIMEOUT + Duration::from_secs((replay.len() >> 20) as u64);
         let req = self
-            .request(Method::PUT, self.url("api/v1/replays", &[("priority", "interactive".into())]))
+            .request(Method::PUT, self.url("api/v1/replays", &[("priority", priority.as_str().into())]))
             .header(CONTENT_TYPE, "application/octet-stream")
             .body(replay)
             .timeout(timeout);

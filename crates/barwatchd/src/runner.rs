@@ -1,4 +1,4 @@
-//! One run of a session: launches `spring-dedicated` on the replay, follows it over
+//! One run of a room: launches `spring-dedicated` on the replay, follows it over
 //! the autohost interface, relays playback commands and tidies up when it ends.
 //!
 //! The dedicated server only streams the recording: it simulates nothing and needs
@@ -6,7 +6,7 @@
 
 use crate::autohost::{Event, Notice};
 use crate::chat::{self, Command};
-use crate::state::{App, Session};
+use crate::state::{App, Replay, Room};
 use anyhow::{bail, Context, Result};
 use barwatch_core::api::{Control, JumpView, Phase};
 use barwatch_core::engine::{self, Binary, Os};
@@ -41,10 +41,9 @@ const SKIP_SAFE_AFTER: Duration = Duration::from_millis(1500);
 /// shorter than a viewer's first launch can take.
 const ENGINE_FIRST_VIEWER_WAIT_S: u32 = 600;
 
-/// Makes sure the engine for `session` is installed. Installs are serialized; a
-/// party whose engine is already there never waits for another party's download.
-pub async fn ensure_engine(app: &App, session: &Session) -> Result<std::path::PathBuf> {
-    let version = &session.demo.engine_version;
+/// Makes sure the engine `version` is installed. Installs are serialized; a room
+/// whose engine is already there never waits for another room's download.
+pub async fn ensure_engine(app: &App, version: &str) -> Result<std::path::PathBuf> {
     if let Some(dir) = engine::find(&app.engines_dir(), version, Binary::Dedicated) {
         return Ok(dir);
     }
@@ -52,7 +51,7 @@ pub async fn ensure_engine(app: &App, session: &Session) -> Result<std::path::Pa
     engine::ensure(&app.http, &app.engines_dir(), version, Os::Linux, Binary::Dedicated, &|_, _| {}).await
 }
 
-/// Resolves when the run is told to stop (or its session is gone).
+/// Resolves when the run is told to stop (or its room is gone).
 async fn stop_requested(cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>) {
     loop {
         match cmds.recv().await {
@@ -63,22 +62,23 @@ async fn stop_requested(cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>) {
     }
 }
 
-/// Owns one run from launch to exit and leaves the session `Idle` (or `Failed`).
-pub async fn run(app: Arc<App>, session: Arc<Session>, mut cmds: mpsc::UnboundedReceiver<RunnerCmd>) {
-    let outcome = serve(&app, &session, &mut cmds).await;
-    session.mutate(|st| {
+/// Owns one run of `replay` (the room's current one when it began) from launch to
+/// exit and leaves the room `Idle` (or `Failed`).
+pub async fn run(app: Arc<App>, room: Arc<Room>, replay: Arc<Replay>, mut cmds: mpsc::UnboundedReceiver<RunnerCmd>) {
+    let outcome = serve(&app, &room, &replay, &mut cmds).await;
+    room.mutate(|st| {
         st.runner = None;
         st.game_port = None;
         st.in_game.clear();
         st.paused = false;
         match outcome {
             Ok(reason) => {
-                crate::log(&format!("session {}: run {} ended: {reason}", session.id, st.run));
+                crate::log(&format!("room {}: run {} of replay {} ended: {reason}", room.uid, st.run, replay.key));
                 st.phase = Phase::Idle;
                 st.note = Some(reason);
             }
             Err(e) => {
-                crate::log(&format!("session {}: run {} failed: {e:#}", session.id, st.run));
+                crate::log(&format!("room {}: run {} of replay {} failed: {e:#}", room.uid, st.run, replay.key));
                 st.phase = Phase::Failed;
                 st.note = Some(format!("{e:#}"));
             }
@@ -86,29 +86,30 @@ pub async fn run(app: Arc<App>, session: Arc<Session>, mut cmds: mpsc::Unbounded
     });
 }
 
-async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>) -> Result<String> {
+async fn serve(
+    app: &Arc<App>,
+    room: &Arc<Room>,
+    replay: &Replay,
+    cmds: &mut mpsc::UnboundedReceiver<RunnerCmd>,
+) -> Result<String> {
+    // The room's current replay always has its file (the cache never drops it).
+    let demo = replay.demo().context("the server does not have this replay's file")?;
     // This can be a download; Stop must still work while it runs.
     let engine_dir = tokio::select! {
-        dir = ensure_engine(app, session) => dir?,
+        dir = ensure_engine(app, &demo.engine_version) => dir?,
         _ = stop_requested(cmds) => return Ok("stopped".into()),
     };
     let binary = Binary::Dedicated.find(&engine_dir).context("engine has no dedicated server")?;
-    let lease = app.take_port().context("every game port is in use; stop another session first")?;
+    let lease = app.take_port().context("every game port is in use; stop another room first")?;
     let autohost = UdpSocket::bind(("127.0.0.1", 0)).await.context("opening the control socket")?;
     let autohost_port = autohost.local_addr()?.port();
 
-    let run_dir = app.run_dir(&session.id);
+    let run_dir = app.run_dir(&room.uid);
     let _ = tokio::fs::remove_dir_all(&run_dir).await;
     tokio::fs::create_dir_all(&run_dir).await.with_context(|| format!("creating {}", run_dir.display()))?;
     let script_path = run_dir.join("script.txt");
     let config_path = run_dir.join("springsettings.cfg");
-    let script = script::dedicated_script(
-        &session.demo.script,
-        &session.demo.game_data,
-        &session.replay_path(),
-        lease.port,
-        autohost_port,
-    )?;
+    let script = script::dedicated_script(&demo.script, &demo.game_data, &replay.replay_path(), lease.port, autohost_port)?;
     tokio::fs::write(&script_path, script).await?;
     tokio::fs::write(&config_path, format!("InitialNetworkTimeout = {ENGINE_FIRST_VIEWER_WAIT_S}\n")).await?;
     let log = std::fs::File::create(run_dir.join("server.log"))?;
@@ -129,7 +130,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("starting {}", binary.display()))?;
-    crate::log(&format!("session {}: server launched on udp {}", session.id, lease.port));
+    crate::log(&format!("room {}: server launched on udp {}", room.uid, lease.port));
 
     let launched = Instant::now();
     let mut link = Link { socket: autohost, peer: None };
@@ -153,7 +154,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                 }
                 return Ok(match stopping {
                     Some((_, reason)) => reason,
-                    None if session.read(|st| st.ended) => "the replay ended".into(),
+                    None if room.read(|st| st.ended) => "the replay ended".into(),
                     None => "the server closed".into(),
                 });
             }
@@ -167,26 +168,26 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                 match Event::parse(&buf[..len]) {
                     Some(Event::Started) => {
                         listening = true;
-                        session.mutate(|st| {
+                        room.mutate(|st| {
                             st.phase = Phase::Running;
                             st.game_port = Some(lease.port);
                         });
                     }
                     Some(Event::Message(text)) => match Notice::parse(&text) {
                         Some(Notice::PlaybackBegan) => played = Some(Duration::ZERO),
-                        Some(Notice::Paused(p)) => session.mutate(|st| st.paused = p),
-                        Some(Notice::ReplayEnded) => session.mutate(|st| st.ended = true),
+                        Some(Notice::Paused(p)) => room.mutate(|st| st.paused = p),
+                        Some(Notice::ReplayEnded) => room.mutate(|st| st.ended = true),
                         None => {}
                     },
-                    Some(Event::PlayerJoined { number, name }) => session.mutate(|st| {
+                    Some(Event::PlayerJoined { number, name }) => room.mutate(|st| {
                         st.in_game.insert(number, name);
                     }),
-                    Some(Event::PlayerLeft { number }) => session.mutate(|st| {
+                    Some(Event::PlayerLeft { number }) => room.mutate(|st| {
                         st.in_game.remove(&number);
                     }),
                     Some(Event::Chat { text, .. }) => match chat::parse(&text) {
                         Some(Ok(Command::Control(control))) => {
-                            let reply = apply(&link, session, control, pregame_skipped, &mut clock).await;
+                            let reply = apply(&link, room, control, pregame_skipped, &mut clock).await;
                             link.send(&reply).await;
                         }
                         Some(Ok(Command::Help)) => link.send(chat::HELP).await,
@@ -198,7 +199,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             }
             cmd = cmds.recv() => match cmd {
                 Some(RunnerCmd::Control(control)) => {
-                    let reply = apply(&link, session, control, pregame_skipped, &mut clock).await;
+                    let reply = apply(&link, room, control, pregame_skipped, &mut clock).await;
                     link.send(&reply).await;
                 }
                 Some(RunnerCmd::Stop) | None => {
@@ -207,7 +208,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
             },
             _ = tick.tick() => {
                 if let Some(time) = &mut played {
-                    let (paused, speed) = session.read(|st| (st.paused, st.speed));
+                    let (paused, speed) = room.read(|st| (st.paused, st.speed));
                     if !paused {
                         *time += tick_every;
                         if pregame_skipped {
@@ -226,7 +227,7 @@ async fn serve(app: &Arc<App>, session: &Arc<Session>, cmds: &mut mpsc::Unbounde
                     let _ = child.start_kill();
                     bail!("the server did not come up within {} s{}", START_TIMEOUT.as_secs(), log_tail(&run_dir));
                 }
-                if session.read(|st| !st.in_game.is_empty() || !st.viewers.is_empty()) {
+                if room.read(|st| !st.in_game.is_empty() || !st.members.is_empty()) {
                     last_presence = Instant::now();
                 } else if last_presence.elapsed() > EMPTY_TIMEOUT {
                     begin_stop(&link, &mut child, &mut stopping, "everyone left").await;
@@ -319,7 +320,7 @@ impl GameClock {
 }
 
 /// Carries out a playback command; returns the line to announce in game chat.
-pub(crate) async fn apply(link: &Link, session: &Session, control: Control, skips_safe: bool, game: &mut GameClock) -> String {
+pub(crate) async fn apply(link: &Link, room: &Room, control: Control, skips_safe: bool, game: &mut GameClock) -> String {
     match control {
         Control::Skip { .. } if !skips_safe => "barwatch: the replay is only just starting; try again in a moment".into(),
         Control::Skip { seconds, relative } => {
@@ -327,13 +328,13 @@ pub(crate) async fn apply(link: &Link, session: &Session, control: Control, skip
             // as it can. A target already passed is ignored by the engine.
             link.send(&format!("/skip {}{seconds}", if relative { "+" } else { "" })).await;
             // The engine stops at the end of the recording.
-            let length = session.read(|st| st.replay.duration_s);
+            let length = room.read(|st| st.replay.as_ref().map_or(0, |r| r.info().duration_s));
             let mut target_s = game.target(seconds, relative);
             if length > 0 {
                 target_s = target_s.min(length);
             }
             if game.skip(target_s) {
-                session.mutate(|st| st.jump = Some(JumpView { target_s, at_unix: crate::state::unix_now() }));
+                room.mutate(|st| st.jump = Some(JumpView { target_s, at_unix: crate::state::unix_now() }));
             }
             if relative {
                 format!("barwatch: jumping ahead {}", clock(seconds))
@@ -343,7 +344,7 @@ pub(crate) async fn apply(link: &Link, session: &Session, control: Control, skip
         }
         Control::Pause { paused } => {
             link.send(if paused { "/pause 1" } else { "/pause 0" }).await;
-            session.mutate(|st| st.paused = paused);
+            room.mutate(|st| st.paused = paused);
             format!("barwatch: {}", if paused { "paused" } else { "resumed" })
         }
         Control::Speed { speed } => {
@@ -360,7 +361,7 @@ pub(crate) async fn apply(link: &Link, session: &Session, control: Control, skip
             ] {
                 link.send(&cmd).await;
             }
-            session.mutate(|st| st.speed = speed);
+            room.mutate(|st| st.speed = speed);
             format!("barwatch: speed {speed}x")
         }
     }

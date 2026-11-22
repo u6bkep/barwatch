@@ -2,7 +2,7 @@
 //!
 //! It serves a small web page and an HTTP API (HTTP/1 and cleartext HTTP/2 on the
 //! same port, for a reverse proxy to speak either), and runs one `spring-dedicated`
-//! per running session on a UDP port from a configured range. It has no login of its
+//! per running room on a UDP port from a configured range. It has no login of its
 //! own: put the web page behind a reverse proxy that does, and let `/app/` through
 //! for the desktop app (see the README).
 
@@ -20,10 +20,11 @@ mod timeline;
 #[path = "../examples/fake_stats/service.rs"]
 mod fake_service;
 #[cfg(test)]
+mod rooms_tests;
+#[cfg(test)]
 mod stats_tests;
 
 use anyhow::{Context, Result};
-use barwatch_core::api::Phase;
 use clap::Parser;
 use state::{App, Config};
 use std::net::SocketAddr;
@@ -40,7 +41,7 @@ struct Args {
     /// Directory for replays, engines and state.
     #[arg(long, env = "BARWATCH_DATA", default_value = "data")]
     data: PathBuf,
-    /// UDP ports for hosting, one per running session, as FIRST-LAST. Viewers'
+    /// UDP ports for hosting, one per running room, as FIRST-LAST. Viewers'
     /// engines connect to these directly, so they must be reachable from outside.
     #[arg(long, env = "BARWATCH_UDP_PORTS", default_value = "8480-8489", value_parser = parse_ports)]
     udp_ports: std::ops::RangeInclusive<u16>,
@@ -51,9 +52,11 @@ struct Args {
     /// Largest replay accepted, in MiB.
     #[arg(long, env = "BARWATCH_MAX_UPLOAD_MB", default_value_t = 256)]
     max_upload_mb: usize,
-    /// Sessions older than this many days are deleted.
-    #[arg(long, env = "BARWATCH_SESSION_DAYS", default_value_t = 14)]
-    session_days: u64,
+    /// Most MiB of replay files kept that the stats service can send again; the
+    /// least recently used go first. Files it cannot send again are kept while a
+    /// room has them recently, whatever their size.
+    #[arg(long, env = "BARWATCH_REPLAY_CACHE_MB", default_value_t = 4096)]
+    replay_cache_mb: u64,
     /// Where the pages send people for the desktop app.
     #[arg(long, env = "BARWATCH_DOWNLOAD_URL", default_value = "https://github.com/u6bkep/barwatch/releases/latest")]
     download_url: String,
@@ -69,6 +72,10 @@ struct Args {
     /// BARWATCH_STATS_TOKEN.
     #[arg(long, env = "BARWATCH_STATS_TOKEN_FILE", conflicts_with = "stats_token")]
     stats_token_file: Option<PathBuf>,
+    /// The stats service's public address, e.g. https://bar-replays.example.org/, for
+    /// "View in Gex" links to its match pages. Unset: no such links.
+    #[arg(long, env = "BARWATCH_STATS_PUBLIC_URL")]
+    stats_public_url: Option<String>,
 }
 
 fn parse_ports(s: &str) -> Result<std::ops::RangeInclusive<u16>, String> {
@@ -93,14 +100,19 @@ async fn main() -> Result<()> {
     if let Some(host) = &args.game_host {
         anyhow::ensure!(barwatch_core::names::valid_host(host), "--game-host {host:?} is not a host name or address");
     }
+    let stats_public_url = match args.stats_public_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        Some(u) => Some(barwatch_core::api::parse_server(u).context("BARWATCH_STATS_PUBLIC_URL")?),
+        None => None,
+    };
     let cfg = Config {
         data,
         udp_ports: args.udp_ports,
         game_host: args.game_host,
         max_upload: args.max_upload_mb << 20,
-        session_days: args.session_days,
+        replay_cache: args.replay_cache_mb << 20,
         download_url: args.download_url,
         archive: source::Archive::default(),
+        stats_public_url,
     };
     let stats_token = match (&args.stats_token, &args.stats_token_file) {
         (Some(t), _) => Some(t.clone()),
@@ -123,7 +135,7 @@ async fn main() -> Result<()> {
     };
     match &stats {
         Some(c) => log(&format!("stats service at {}", c.base())),
-        None => log("no stats service configured; parties have no statistics timeline"),
+        None => log("no stats service configured; rooms have no statistics timeline, and replay files are kept only while rooms have them recently"),
     }
     let stats = timeline::Service::new(stats, timeline::Tuning::default());
     let app = Arc::new(App::new(cfg, barwatch_core::http_client()?, stats)?);
@@ -158,37 +170,37 @@ async fn shutdown() {
     log("shutting down");
 }
 
-/// Fetches the map list (for pictures) and fills in sessions created before it came.
+/// Fetches the map list (for pictures) and fills in replays recorded before it came.
 async fn load_maps(app: Arc<App>) {
     let index = barwatch_core::maps::MapIndex::load(&app.http, &app.cfg.data.join("cache/maps.json")).await;
     if index.is_empty() {
         log("map list unavailable; map pictures use guessed names");
     }
     *app.maps.write().unwrap() = index;
-    for session in app.sessions() {
-        let file = app.maps.read().unwrap().file_name(&session.read(|st| st.replay.map.clone()));
-        session.mutate(|st| st.replay.map_file = Some(file));
+    for replay in app.replays() {
+        let file = app.maps.read().unwrap().file_name(&replay.info().map);
+        replay.set_map_file(file);
+    }
+    for room in app.rooms() {
+        room.mutate(|_| ());
     }
 }
 
+/// Rooms are permanent (DESIGN §9.2); viewers expire, and the cache is kept in
+/// bounds (a replay the service confirmed becomes one it can let go).
 async fn housekeeping(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        let limit = state::unix_now().saturating_sub(app.cfg.session_days * 24 * 3600);
-        for session in app.sessions() {
-            session.expire_viewers();
+        for room in app.rooms() {
+            room.expire_viewers();
             // Viewers count as demand for the statistics (DESIGN §4.1).
-            if session.read(|st| !st.viewers.is_empty() || !st.in_game.is_empty()) {
-                timeline::ensure(&app, &session, false, false);
-            }
-            let (created, phase) = session.read(|st| (st.created_unix, st.phase));
-            if created < limit && matches!(phase, Phase::Idle | Phase::Failed) {
-                log(&format!("session {} expired", session.id));
-                app.remove_session(&session.id);
+            if let Some(replay) = room.read(|st| st.replay.clone().filter(|_| !st.members.is_empty() || !st.in_game.is_empty())) {
+                timeline::ensure(&app, &replay, false, false);
             }
         }
         timeline::evict(&app);
+        app.trim_cache();
     }
 }
 

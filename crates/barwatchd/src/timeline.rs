@@ -1,21 +1,22 @@
-//! A party's statistics (DESIGN §4.1): making sure the stats service knows the
-//! game, following its record stream into a [`TimelineBuilder`], and what
-//! `GET /app/v1/sessions/{id}/timeline` answers.
+//! A replay's statistics (DESIGN §4.1, §9.4): making sure the stats service knows
+//! the game, following its record stream into a [`TimelineBuilder`], and what
+//! `GET /app/v1/rooms/{id}/timeline` answers for a room's current replay.
 //!
-//! Each session has a [`Slot`]. One task per session ([`ensure`] starts it) does the
-//! work:
-//! - **Registering**: right after the party is created, and again whenever the
+//! Each replay has a [`Slot`], shared by every room playing it. One task per replay
+//! ([`ensure`] starts it) does the work:
+//! - **Registering**: right after a room picks the replay, and again whenever the
 //!   service says it does not know the game. An upload goes up as the file
-//!   (`PUT /api/v1/replays`); a party made from a BAR link or id is submitted by
+//!   (`PUT /api/v1/replays`); a replay fetched by a BAR link or id is submitted by
 //!   game id (`POST /api/v1/games`), so the service records it as coming from BAR's
 //!   store, and is uploaded only if the service cannot find it that way. The game
 //!   id the service answers with must be the one in the replay's own header. It is
-//!   stored with the session (`meta.json`). Retries back off up to five minutes and
+//!   stored with the replay (`meta.json`). Retries back off up to five minutes and
 //!   go on for an hour without anyone watching; after that they wait for demand.
-//! - **Following**: while there is demand (a registered viewer, an engine in the
-//!   game, or a timeline request in the last [`POLL_DEMAND`]), it long-polls the
-//!   game's status and reads the record stream with `follow=1`, resuming from the
-//!   last `_cursor`'s `next` after a drop. At most [`MAX_FOLLOWERS`] sessions follow
+//! - **Following**: while there is demand (a registered viewer or an engine in the
+//!   game of a room whose current replay it is, or a timeline request in the last
+//!   [`POLL_DEMAND`]), it long-polls the game's status and reads the record stream
+//!   with `follow=1`, resuming from the last `_cursor`'s `next` after a drop. At
+//!   most [`MAX_FOLLOWERS`] replays follow
 //!   at once: each holds a turn for as long as it holds a builder, so that many
 //!   builders exist at most, whatever their streams do; the others say they are
 //!   waiting for one. A follower that can read nothing (the game failed, the
@@ -32,8 +33,8 @@
 //! that sends nothing for [`STALL`] is dropped and resumed, and one game's stream may
 //! not exceed [`MAX_STREAM_BYTES`] in total.
 
-use crate::state::{App, Session};
-use crate::stats_client::{GameStatus, StatsClient, SvcError, SvcPhase};
+use crate::state::{App, Replay};
+use crate::stats_client::{GameStatus, Priority, StatsClient, SvcError, SvcPhase};
 use axum::body::Bytes;
 use barwatch_core::api::TimelineState;
 use barwatch_core::timeline::{self, TimelineBuilder, TimelineDoc};
@@ -45,13 +46,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
-/// Sessions following a stream at the same time; each holds a builder.
+/// Replays following a stream at the same time; each holds a builder.
 pub const MAX_FOLLOWERS: usize = 16;
 /// A timeline request counts as demand for this long.
 pub const POLL_DEMAND: Duration = Duration::from_secs(90);
 /// Following goes on this long after the last demand.
 pub const LINGER: Duration = Duration::from_secs(60);
-/// Total estimated size of the complete documents kept for sessions nobody follows.
+/// Total estimated size of the complete documents kept for replays nobody follows.
 pub const KEPT_BUDGET: usize = 64 << 20;
 /// A stream that sends nothing for this long is dropped and resumed (the service
 /// sends a `_cursor` line at least every few seconds).
@@ -59,7 +60,7 @@ pub const STALL: Duration = Duration::from_secs(30);
 /// Most bytes read from one game's record stream, over all connections. The
 /// filtered stream of an 18-team game is about 7 MB.
 pub const MAX_STREAM_BYTES: u64 = 512 << 20;
-/// Registration is retried this long after a party is created, watched or not.
+/// Registration is retried this long after a room picks the replay, watched or not.
 const REGISTER_WINDOW: Duration = Duration::from_secs(3600);
 /// Status long-poll wait.
 const STATUS_WAIT: Duration = Duration::from_secs(25);
@@ -141,7 +142,7 @@ enum Reg {
 #[derive(Debug)]
 struct Inner {
     rev: u64,
-    /// A task works for this session.
+    /// A task works for this replay.
     task: bool,
     /// Something wanted the task while it ran; it must not stop on stale facts.
     kick: bool,
@@ -165,8 +166,10 @@ struct Inner {
     cache: Option<(u64, Bytes)>,
 }
 
-/// One session's statistics.
+/// One replay's statistics.
 pub struct Slot {
+    /// The replay's key, which the view names.
+    key: String,
     inner: Mutex<Inner>,
     rev: watch::Sender<u64>,
     /// Held while the view is written: the pollers a change wakes all at once wait
@@ -184,6 +187,7 @@ struct ViewRef<'a> {
     note: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     doc: Option<&'a TimelineDoc>,
+    replay: &'a str,
 }
 
 type Key = (TimelineState, Option<String>, Option<(u64, bool)>);
@@ -223,7 +227,7 @@ impl Inner {
             return (Unavailable, say("The statistics service cannot send its results yet; it needs a newer version."));
         }
         if self.waiting_for_turn {
-            return (Unavailable, say("Too many watch parties are following statistics at once; waiting for a turn."));
+            return (Unavailable, say("Too many rooms are following statistics at once; waiting for a turn."));
         }
         match self.status.as_ref().map(GameStatus::phase) {
             Some(SvcPhase::Simulating | SvcPhase::Done) => (Building, None),
@@ -240,8 +244,9 @@ impl Inner {
 }
 
 impl Slot {
-    pub fn new(game_id: Option<String>) -> Slot {
+    pub fn new(key: &str, game_id: Option<String>) -> Slot {
         Slot {
+            key: key.to_owned(),
             inner: Mutex::new(Inner {
                 rev: 1,
                 task: false,
@@ -312,7 +317,7 @@ impl Slot {
             (i.rev, state, note, i.doc.clone())
         };
         // Written outside the lock: a whole game's document takes a moment.
-        let json = serde_json::to_vec(&ViewRef { rev, state, note: note.as_deref(), doc: doc.as_deref() })
+        let json = serde_json::to_vec(&ViewRef { rev, state, note: note.as_deref(), doc: doc.as_deref(), replay: &self.key })
             .expect("a timeline view serializes");
         let bytes = Bytes::from(json);
         let mut i = self.inner.lock().unwrap();
@@ -343,11 +348,11 @@ fn estimate(doc: &TimelineDoc) -> usize {
     samples * 8 + doc.marks.len() * 64 + doc.teams.len() * 128 + 1024
 }
 
-/// Drops the least recently used complete documents of sessions nobody follows
+/// Drops the least recently used complete documents of replays nobody follows
 /// until the rest fit in [`KEPT_BUDGET`]. A dropped one is read again on demand.
 pub fn evict(app: &App) {
-    let mut kept: Vec<(Instant, usize, Arc<Session>)> =
-        app.sessions().into_iter().filter_map(|s| s.stats.kept(app.stats.tuning.poll_demand).map(|(n, at)| (at, n, s))).collect();
+    let mut kept: Vec<(Instant, usize, Arc<Replay>)> =
+        app.replays().into_iter().filter_map(|s| s.stats.kept(app.stats.tuning.poll_demand).map(|(n, at)| (at, n, s))).collect();
     let mut total: usize = kept.iter().map(|(_, n, _)| n).sum();
     kept.sort_by_key(|(at, _, _)| *at);
     for (_, n, s) in kept {
@@ -368,14 +373,14 @@ pub fn evict(app: &App) {
     }
 }
 
-/// Something wants this session's statistics: `poll` for a timeline request,
-/// `register` right after the party is created. Starts the task if it is needed and
-/// not running.
-pub fn ensure(app: &Arc<App>, session: &Arc<Session>, poll: bool, register: bool) {
+/// Something wants this replay's statistics: `poll` for a timeline request,
+/// `register` right after a room picks it. Starts the task if it is needed and not
+/// running.
+pub fn ensure(app: &Arc<App>, replay: &Arc<Replay>, poll: bool, register: bool) {
     if app.stats.client.is_none() {
         return;
     }
-    let spawn = session.stats.change(|i| {
+    let spawn = replay.stats.change(|i| {
         let now = Instant::now();
         if poll {
             i.last_poll = Some(now);
@@ -396,14 +401,14 @@ pub fn ensure(app: &Arc<App>, session: &Arc<Session>, poll: bool, register: bool
         true
     });
     if spawn {
-        tokio::spawn(run(app.clone(), session.clone()));
+        tokio::spawn(run(app.clone(), replay.clone()));
     }
 }
 
-/// Whether anyone wants the statistics now.
-fn demand(session: &Session, t: &Tuning) -> bool {
-    session.read(|st| !st.viewers.is_empty() || !st.in_game.is_empty())
-        || session.stats.read(|i| i.last_poll.is_some_and(|at| at.elapsed() < t.poll_demand))
+/// Whether anyone wants the statistics now: someone in a room playing the replay, or
+/// a recent timeline request.
+fn demand(app: &App, replay: &Replay, t: &Tuning) -> bool {
+    replay.stats.read(|i| i.last_poll.is_some_and(|at| at.elapsed() < t.poll_demand)) || app.watched(replay)
 }
 
 /// Doubling waits from a first one (one second unless said) up to a ceiling.
@@ -448,10 +453,10 @@ enum FollowEnd {
     Parked(Duration),
 }
 
-/// The session's task. Ends when nothing needs it (see the module documentation).
-async fn run(app: Arc<App>, session: Arc<Session>) {
+/// The replay's task. Ends when nothing needs it (see the module documentation).
+async fn run(app: Arc<App>, replay: Arc<Replay>) {
     let client = app.stats.client.as_ref().expect("only started with a client");
-    let slot = &session.stats;
+    let slot = &replay.stats;
     let t = &app.stats.tuning;
     let mut builder: Option<Follower> = None;
     // Read from the replay once per task, not on every new builder.
@@ -459,10 +464,10 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
     let mut backoff = Backoff::new(Duration::from_secs(300));
     let mut last_demand = Instant::now();
     loop {
-        if session.is_closed() {
+        if replay.is_closed() {
             break;
         }
-        let wanted = still_wanted(&session, t, &mut last_demand);
+        let wanted = still_wanted(&app, &replay, t, &mut last_demand);
         let (game_id, registering, settled, gave_up) = slot.read(|i| {
             let registering = i.register_until.is_some_and(|t| Instant::now() < t);
             (i.game_id.clone(), registering, i.doc.as_ref().is_some_and(|d| d.complete), i.trouble.is_some())
@@ -474,7 +479,7 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
         if !work {
             if gave_up && wanted {
                 // Nothing to do but stay until demand ends, so the note stands.
-                nap(&session, t, &mut last_demand, false, Duration::from_secs(5)).await;
+                nap(&app, &replay, t, &mut last_demand, false, Duration::from_secs(5)).await;
                 continue;
             }
             // Stop, unless something wanted the task since the facts were read.
@@ -501,29 +506,35 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
         match game_id {
             None if slot.read(|i| i.register_after.is_some_and(|t| Instant::now() < t)) => {
                 // Refused not long ago: nothing changes by asking again yet.
-                nap(&session, t, &mut last_demand, true, Duration::from_secs(5)).await;
+                nap(&app, &replay, t, &mut last_demand, true, Duration::from_secs(5)).await;
             }
-            None => match register(&session, client).await {
+            None => match register(&app, &replay, client).await {
                 // The backoff is reset once following gets somewhere, not here: a
                 // service that takes games and then denies them is not to be
                 // cycled quickly.
                 Ok(()) => {}
                 // `register_after` holds the next try back.
                 Err(Some(_)) => {}
-                Err(None) => nap(&session, t, &mut last_demand, true, backoff.take()).await,
+                Err(None) => nap(&app, &replay, t, &mut last_demand, true, backoff.take()).await,
             },
             Some(id) => {
                 if builder.is_none() {
+                    if teams.is_none() && !replay.has_file() {
+                        // The cache let the file go (the room moved on): nothing to
+                        // build with until a room picks the replay again.
+                        nap(&app, &replay, t, &mut last_demand, false, Duration::from_secs(5)).await;
+                        continue;
+                    }
                     // A turn among the followers, held as long as the builder: at
                     // most that many builders exist, whatever their streams do.
                     let Ok(permit) = app.stats.permits.clone().try_acquire_owned() else {
                         slot.change(|i| i.waiting_for_turn = true);
-                        nap(&session, t, &mut last_demand, false, Duration::from_secs(2)).await;
+                        nap(&app, &replay, t, &mut last_demand, false, Duration::from_secs(2)).await;
                         continue;
                     };
                     slot.change(|i| i.waiting_for_turn = false);
                     if teams.is_none() {
-                        teams = read_teams(&session).await;
+                        teams = read_teams(&replay).await;
                     }
                     let Some(teams) = teams.clone() else {
                         slot.change(|i| i.trouble = Some("The server could not read its own copy of the replay.".into()));
@@ -532,7 +543,7 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
                     builder = Some(Follower::new(slot, teams, permit));
                 }
                 let f = builder.as_mut().unwrap();
-                let end = follow(&app, &session, client, &id, f, &mut last_demand).await;
+                let end = follow(&app, &replay, client, &id, f, &mut last_demand).await;
                 // Whatever connection was open is gone: a resumed one starts on a
                 // line of its own.
                 f.lost();
@@ -541,13 +552,13 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
                 }
                 match end {
                     FollowEnd::Complete => {
-                        crate::log(&format!("session {}: statistics complete ({:?})", session.id, f.builder.stats()));
+                        crate::log(&format!("replay {}: statistics complete ({:?})", replay.key, f.builder.stats()));
                         builder = None;
                     }
                     FollowEnd::Unknown => {
                         crate::log(&format!(
-                            "session {}: the stats service does not know game {id}; registering it again",
-                            session.id
+                            "replay {}: the stats service does not know game {id}; registering it again",
+                            replay.key
                         ));
                         // What was read belongs to a simulation the service no longer
                         // has; the turn is not needed while registering.
@@ -556,15 +567,15 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
                             i.doc = None;
                             i.cache = None;
                         });
-                        match register(&session, client).await {
+                        match register(&app, &replay, client).await {
                             // Not at once even so: a service that takes games and
                             // then denies knowing them would otherwise be sent the
                             // replay in a loop.
-                            Ok(()) => nap(&session, t, &mut last_demand, false, backoff.take()).await,
+                            Ok(()) => nap(&app, &replay, t, &mut last_demand, false, backoff.take()).await,
                             // Registering starts over, with its own waits and notes.
                             Err(again) => {
                                 if again.is_none() {
-                                    nap(&session, t, &mut last_demand, false, backoff.take()).await;
+                                    nap(&app, &replay, t, &mut last_demand, false, backoff.take()).await;
                                 }
                                 slot.change(|i| i.game_id = None);
                             }
@@ -581,7 +592,7 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
                     }
                     FollowEnd::Parked(wait) => {
                         builder = None;
-                        nap(&session, t, &mut last_demand, false, wait).await;
+                        nap(&app, &replay, t, &mut last_demand, false, wait).await;
                     }
                     FollowEnd::NoDemand | FollowEnd::Gone => {}
                 }
@@ -593,20 +604,20 @@ async fn run(app: Arc<App>, session: Arc<Session>) {
 
 /// Whether anyone wanted the statistics within [`LINGER`]; `last_demand` is when
 /// someone last did.
-fn still_wanted(session: &Session, t: &Tuning, last_demand: &mut Instant) -> bool {
-    if demand(session, t) {
+fn still_wanted(app: &App, replay: &Replay, t: &Tuning, last_demand: &mut Instant) -> bool {
+    if demand(app, replay, t) {
         *last_demand = Instant::now();
     }
     last_demand.elapsed() < t.linger
 }
 
-/// Sleeps `wait`, or less if the session goes away or nobody wants its statistics
+/// Sleeps `wait`, or less if the replay goes away or nobody wants its statistics
 /// any more (nor, with `registering`, is it in its registration window).
-async fn nap(session: &Session, t: &Tuning, last_demand: &mut Instant, registering: bool, wait: Duration) {
+async fn nap(app: &App, replay: &Replay, t: &Tuning, last_demand: &mut Instant, registering: bool, wait: Duration) {
     let until = Instant::now() + wait;
-    while Instant::now() < until && !session.is_closed() {
-        let window = registering && session.stats.read(|i| i.register_until.is_some_and(|r| Instant::now() < r));
-        if !still_wanted(session, t, last_demand) && !window {
+    while Instant::now() < until && !replay.is_closed() {
+        let window = registering && replay.stats.read(|i| i.register_until.is_some_and(|r| Instant::now() < r));
+        if !still_wanted(app, replay, t, last_demand) && !window {
             return;
         }
         tokio::time::sleep((until - Instant::now()).min(Duration::from_secs(1))).await;
@@ -614,9 +625,9 @@ async fn nap(session: &Session, t: &Tuning, last_demand: &mut Instant, registeri
 }
 
 /// The teams of the replay the daemon holds, with names, sides and colours.
-async fn read_teams(session: &Session) -> Option<Vec<timeline::TeamEntry>> {
-    let path = session.replay_path();
-    let demo = session.demo.clone();
+async fn read_teams(replay: &Replay) -> Option<Vec<timeline::TeamEntry>> {
+    let path = replay.replay_path();
+    let demo = replay.demo()?;
     tokio::task::spawn_blocking(move || {
         let facts = barwatch_core::stats::StatsHistory::read(&path).ok()?.events;
         Some(timeline::teams_from_replay(&demo, &facts))
@@ -627,9 +638,9 @@ async fn read_teams(session: &Session) -> Option<Vec<timeline::TeamEntry>> {
 
 /// Makes sure the service knows the game. `Err(Some(wait))` asks for a fixed
 /// wait before the next try, `Err(None)` for the usual backoff.
-async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<Duration>> {
-    let slot = &session.stats;
-    let Some(id) = session.header_game_id.clone() else {
+async fn register(app: &App, replay: &Replay, client: &StatsClient) -> Result<(), Option<Duration>> {
+    let slot = &replay.stats;
+    let Some(id) = replay.header_game_id.clone() else {
         slot.change(|i| {
             i.reg = Reg::NoId;
             i.register_after = Some(Instant::now() + Duration::from_secs(3600));
@@ -637,12 +648,11 @@ async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<
         return Err(Some(Duration::from_secs(3600)));
     };
     let upload = || async {
-        let bytes = tokio::fs::read(session.replay_path())
-            .await
-            .map_err(|e| SvcError::Unreachable(format!("reading the replay: {e}")))?;
-        client.upload(bytes).await
+        let bytes =
+            tokio::fs::read(replay.replay_path()).await.map_err(|e| SvcError::Unreachable(format!("reading the replay: {e}")))?;
+        client.upload(bytes, Priority::Interactive).await
     };
-    let answer = if session.bar_replay.is_some() {
+    let answer = if replay.bar_replay.is_some() {
         match client.submit_game(&id).await {
             // Not found that way (too new for the service's lists, say): hand it the file.
             Err(SvcError::NotFound(_) | SvcError::Refused(_)) => upload().await,
@@ -653,9 +663,12 @@ async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<
     };
     let (reg, wait) = match answer {
         Ok(st) if st.game_id == id => {
-            crate::log(&format!("session {}: stats service has game {id} ({})", session.id, st.state));
-            if let Err(e) = session.set_game_id(&id) {
-                crate::log(&format!("session {}: storing the game id: {e:#}", session.id));
+            crate::log(&format!("replay {}: stats service has game {id} ({})", replay.key, st.state));
+            match replay.set_game_id(&id) {
+                // Rooms show it (and `match_url`, and whether the file can be had).
+                Ok(true) => app.replay_changed(&replay.key),
+                Ok(false) => {}
+                Err(e) => crate::log(&format!("replay {}: storing the game id: {e:#}", replay.key)),
             }
             slot.change(|i| {
                 i.game_id = Some(id.clone());
@@ -672,7 +685,7 @@ async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<
         }
         Err(SvcError::Refused(w) | SvcError::NotFound(w)) => (Reg::Refused(w), Duration::from_secs(3600)),
         Err(e @ (SvcError::Unreachable(_) | SvcError::Malformed(_))) => {
-            crate::log(&format!("session {}: registering game {id}: {e}", session.id));
+            crate::log(&format!("replay {}: registering game {id}: {e}", replay.key));
             slot.change(|i| {
                 i.reg = Reg::Pending;
                 i.unreachable = true;
@@ -680,7 +693,7 @@ async fn register(session: &Session, client: &StatsClient) -> Result<(), Option<
             return Err(None);
         }
     };
-    crate::log(&format!("session {}: registering game {id}: {reg:?}", session.id));
+    crate::log(&format!("replay {}: registering game {id}: {reg:?}", replay.key));
     slot.change(|i| {
         i.reg = reg;
         i.register_after = Some(Instant::now() + wait);
@@ -854,13 +867,13 @@ impl Stream {
 /// Follows one game while there is demand.
 async fn follow(
     app: &App,
-    session: &Session,
+    replay: &Replay,
     client: &StatsClient,
     game_id: &str,
     f: &mut Follower,
     last_demand: &mut Instant,
 ) -> FollowEnd {
-    let slot = &session.stats;
+    let slot = &replay.stats;
     let t = &app.stats.tuning;
 
     let status_call = |rev: Option<u64>, delay: Duration| -> Pending<Result<GameStatus, SvcError>> {
@@ -930,7 +943,7 @@ async fn follow(
                         STATUS_EVERY.saturating_sub(status_sent.elapsed())
                     }
                     Ok(st) => {
-                        crate::log(&format!("session {}: stats service answered for game {} instead of {game_id}", session.id, st.game_id));
+                        crate::log(&format!("replay {}: stats service answered for game {} instead of {game_id}", replay.key, st.game_id));
                         failed(&mut first_failure, heard);
                         status_backoff.take()
                     }
@@ -943,7 +956,7 @@ async fn follow(
                     }
                     Err(e) => {
                         if !matches!(e, SvcError::Unreachable(_)) {
-                            crate::log(&format!("session {}: status of game {game_id}: {e}", session.id));
+                            crate::log(&format!("replay {}: status of game {game_id}: {e}", replay.key));
                         }
                         failed(&mut first_failure, heard);
                         status_backoff.take()
@@ -974,7 +987,7 @@ async fn follow(
                     // The game is known (its status answered), so it is the call
                     // that is missing: a service older than the record stream.
                     // Nothing to read: the turn goes to others.
-                    crate::log(&format!("session {}: stats service has no record stream ({w}); asking again in {} s", session.id, t.records_retry.as_secs()));
+                    crate::log(&format!("replay {}: stats service has no record stream ({w}); asking again in {} s", replay.key, t.records_retry.as_secs()));
                     succeeded(&mut first_failure);
                     f.publish(slot, true);
                     slot.change(|i| i.records_missing = true);
@@ -989,7 +1002,7 @@ async fn follow(
                 }
                 StreamEvent::Opened(Err(e)) => {
                     if !matches!(e, SvcError::Unreachable(_)) {
-                        crate::log(&format!("session {}: record stream of game {game_id}: {e}", session.id));
+                        crate::log(&format!("replay {}: record stream of game {game_id}: {e}", replay.key));
                     }
                     failed(&mut first_failure, heard);
                     stream = Stream::Idle(Instant::now() + stream_backoff.take());
@@ -999,7 +1012,7 @@ async fn follow(
                     // by the document (a cursor alone can be moved for nothing).
                     f.take(&bytes);
                     if f.bytes > t.max_stream_bytes {
-                        crate::log(&format!("session {}: record stream of game {game_id} passed {} bytes; giving up", session.id, t.max_stream_bytes));
+                        crate::log(&format!("replay {}: record stream of game {game_id} passed {} bytes; giving up", replay.key, t.max_stream_bytes));
                         slot.change(|i| i.trouble = Some("The statistics service sent far more than any game makes; giving up on it.".into()));
                         return FollowEnd::GaveUp;
                     }
@@ -1024,7 +1037,7 @@ async fn follow(
                         stream_backoff.reset();
                     }
                     let wait = stream_backoff.take();
-                    crate::log(&format!("session {}: record stream of game {game_id} {why}; resuming from line {} in {:.1} s", session.id, f.from, wait.as_secs_f32()));
+                    crate::log(&format!("replay {}: record stream of game {game_id} {why}; resuming from line {} in {:.1} s", replay.key, f.from, wait.as_secs_f32()));
                     stream = Stream::Idle(Instant::now() + wait);
                 }
             },
@@ -1034,10 +1047,10 @@ async fn follow(
                 if heard && first_failure.is_some_and(|since| since.elapsed() >= t.unreachable_grace) {
                     slot.change(|i| i.unreachable = true);
                 }
-                if session.is_closed() {
+                if replay.is_closed() {
                     return FollowEnd::Gone;
                 }
-                if !still_wanted(session, t, last_demand) {
+                if !still_wanted(app, replay, t, last_demand) {
                     return FollowEnd::NoDemand;
                 }
             }

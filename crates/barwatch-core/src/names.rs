@@ -60,7 +60,7 @@ pub fn valid_content_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 200 && !n.starts_with('-') && !n.chars().any(char::is_control)
 }
 
-/// A session id or token: URL-safe and long enough not to be guessable.
+/// A room id or token: URL-safe and long enough not to be guessable.
 pub fn valid_id(id: &str) -> bool {
     (16..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric())
 }

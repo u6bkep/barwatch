@@ -2,8 +2,10 @@
 //! compiled into barwatchd's tests, so it uses nothing but external crates.
 //!
 //! It knows one game with output: the configured raw output file, released as a
-//! simulation at a chosen pace would produce it. Any other uploaded replay is
-//! accepted and stays queued forever with an empty stream.
+//! simulation at a chosen pace would produce it. Its twins (other game ids, for
+//! tests that need several games) share that output and its clock, but not its
+//! replay file. Any other uploaded replay is accepted and stays queued forever with
+//! an empty stream.
 
 // Parts are used only by barwatchd's tests, others only by the command.
 #![allow(dead_code)]
@@ -30,6 +32,9 @@ pub struct Options {
     /// The game's raw output, one record per entry, without line ends.
     pub lines: Vec<Vec<u8>>,
     pub game_id: String,
+    /// Other game ids that behave as `game_id` does (same output, same clock), except
+    /// that the service has no replay file for them.
+    pub twins: Vec<String>,
     pub replay: Option<Vec<u8>>,
     pub replay_name: String,
     /// Game seconds simulated per wall-clock second; `None` for all at once.
@@ -76,6 +81,7 @@ impl Options {
             token: token.to_owned(),
             lines,
             game_id: game_id.to_ascii_lowercase(),
+            twins: Vec::new(),
             replay: None,
             replay_name: format!("{game_id}.sdfz"),
             rate: None,
@@ -207,6 +213,11 @@ impl Fake {
         }
     }
 
+    /// Whether `id` is the game with output, or one of its twins.
+    fn ours(&self, id: &str) -> bool {
+        id == self.opts.game_id || self.opts.twins.iter().any(|t| t == id)
+    }
+
     /// Whether the game was registered.
     pub fn registered(&self) -> bool {
         self.sim.lock().unwrap().since.is_some()
@@ -257,7 +268,7 @@ impl Fake {
     }
 
     fn status_json(&self, id: &str) -> Option<Value> {
-        let (state, frame, error) = if id == self.opts.game_id {
+        let (state, frame, error) = if self.ours(id) {
             let n = self.now()?;
             (n.state, n.frame, n.error)
         } else if self.sim.lock().unwrap().others.contains(id) {
@@ -284,7 +295,7 @@ impl Fake {
 
     fn register(&self, id: &str) -> bool {
         let mut sim = self.sim.lock().unwrap();
-        if id == self.opts.game_id {
+        if self.ours(id) {
             sim.since.get_or_insert_with(Instant::now);
         } else {
             sim.others.insert(id.to_owned());
@@ -419,7 +430,7 @@ async fn submit(State(fake): State<Arc<Fake>>, body: Bytes) -> Response {
         (None, Some(_)) => return err(StatusCode::NOT_FOUND, "fake: submitting by file name is not supported"),
         _ => return err(StatusCode::BAD_REQUEST, "give exactly one of file_name and game_id"),
     };
-    if id != fake.opts.game_id || fake.opts.no_resolve {
+    if !fake.ours(&id) || fake.opts.no_resolve {
         return err(StatusCode::NOT_FOUND, &format!("no replay known for game {id}"));
     }
     let created = fake.register(&id);
@@ -505,7 +516,7 @@ async fn records(State(fake): State<Arc<Fake>>, Path(id): Path<String>, Query(q)
     if fake.opts.no_records {
         return err(StatusCode::NOT_FOUND, "no such API call");
     }
-    let ours = id == fake.opts.game_id;
+    let ours = fake.ours(&id);
     if ours && fake.now().is_none() || !ours && !fake.sim.lock().unwrap().others.contains(&id) {
         return err(StatusCode::NOT_FOUND, &format!("unknown game {id}"));
     }
