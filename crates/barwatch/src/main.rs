@@ -1,8 +1,8 @@
-//! barwatch: join a watch party of a Beyond All Reason replay.
+//! barwatch: watch Beyond All Reason replays together, in rooms.
 //!
-//! Started by a `barwatch://` link (or with one pasted in), it installs the engine,
-//! game version and map the replay needs into BAR's own data directory and starts
-//! the game as a spectator of the party's server.
+//! Started by a `barwatch://` link (or with one pasted in), it joins a room, installs
+//! the engine, game version and map of the room's replay into BAR's own data
+//! directory and starts the game as a spectator of the room's server.
 
 // No console window behind the app on Windows.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -44,10 +44,10 @@ enum Cmd {
     Register,
     /// Undo `register`.
     Unregister,
-    /// Join a watch party without the window, printing progress (for testing).
+    /// Join a room without the window, printing progress (for testing).
     Join {
         link: String,
-        /// Name to show other viewers.
+        /// Name to show the room's other members.
         #[arg(long)]
         name: Option<String>,
         /// Run the windowless engine build instead of the game.
@@ -141,7 +141,7 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
         return Ok(());
     }
 
-    let opened = link.and_then(|text| match Link::parse_any(&text) {
+    let opened = link.and_then(|text| match uri::parse_link(&text) {
         Ok(link) => Some(link),
         Err(e) => {
             eprintln!("ignoring {text:?}: {e:#}");
@@ -164,9 +164,9 @@ fn run_window(cfg: config::Config, data: datadir::DataDir, link: Option<String>)
     barwatch_host::run_host_app_with_config("barwatch", viewport, ui, host).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// `barwatch join`: the session client driven from a terminal.
+/// `barwatch join`: the room client driven from a terminal.
 fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
-    let Link::Join { server, session } = Link::parse_any(link)? else { bail!("that is a pairing link, not an invite") };
+    let Link::Join { server, room } = uri::parse_link(link)? else { bail!("that is a pairing link, not an invite") };
     let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
     runtime.block_on(async move {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -174,12 +174,11 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
         // The game position, printed once a second while the engine runs.
         let shown = std::sync::Arc::new(std::sync::Mutex::new((false, None::<position::Position>)));
         let latest = shown.clone();
-        let run = client::run(barwatch_core::http_client()?, server, session, settings, rx, move |update| {
-            let phase = update.session.as_ref().map(|s| format!("{:?}", s.phase)).unwrap_or_default();
-            let line = format!("[{}] {:?} (party: {phase})", update.name, update.stage);
+        let run = client::run(barwatch_core::http_client()?, server, room, settings, rx, move |update| {
+            let line = status_line(&update);
             let mut last = last.lock().unwrap();
             if *last != line {
-                eprintln!("{line}");
+                eprintln!("{} {line}", chrono::Local::now().format("%H:%M:%S%.3f"));
                 *last = line;
             }
             if let Some(notice) = &update.notice {
@@ -214,6 +213,19 @@ fn join_in_terminal(link: &str, settings: client::Settings) -> Result<()> {
         ticker.abort();
         Ok(())
     })
+}
+
+/// `[Sorrel as Sorrel] Ready for 4f…e1 (room "Friday": Idle, replay 4f…e1, run 0)`:
+/// who this viewer is, where it stands and for which replay, and the room.
+fn status_line(update: &client::Update) -> String {
+    let key = |k: Option<&str>| k.map_or("none".to_owned(), str::to_owned);
+    let room = match &update.room {
+        Some(r) => {
+            format!("room {:?}: {:?}, replay {}, run {}", r.name, r.phase, key(r.replay.as_ref().map(|p| p.key.as_str())), r.run)
+        }
+        None => "room not seen yet".to_owned(),
+    };
+    format!("[{} as {}] {:?} for {} ({room})", update.member, update.engine_name, update.stage, key(update.replay.as_deref()))
 }
 
 /// `16:47:01.234 game 5:00.4 (f=9012 1.00x running, report 0.3 s old)`.

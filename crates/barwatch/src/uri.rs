@@ -192,3 +192,32 @@ pub fn register() -> Result<()> {
 pub fn unregister() -> Result<()> {
     imp::unregister()
 }
+
+/// Reads a link the user pasted or a browser handed over: a `barwatch://` link or
+/// an invite page's address. A watch-party link from barwatch 0.3 (`session=`) is
+/// refused with words that say what to do instead.
+pub fn parse_link(text: &str) -> Result<barwatch_core::api::Link> {
+    use barwatch_core::api::Link;
+    Link::parse_any(text).map_err(|e| {
+        let old = url::Url::parse(text.trim()).is_ok_and(|u| u.scheme() == "barwatch" && u.query_pairs().any(|(k, _)| k == "session"));
+        if old {
+            anyhow::anyhow!(
+                "this is an invite to a watch party of an older barwatch; watch parties have become rooms, so ask for the room's link"
+            )
+        } else {
+            e
+        }
+    })
+}
+
+#[cfg(test)]
+mod link_tests {
+    #[test]
+    fn an_old_party_link_says_what_to_do() {
+        let old = "barwatch://join?server=https%3A%2F%2Fx.org%2F&session=abcdefghijklmnopqrstuv";
+        let e = super::parse_link(old).unwrap_err().to_string();
+        assert!(e.contains("rooms"), "{e}");
+        assert!(super::parse_link("barwatch://join?server=https%3A%2F%2Fx.org%2F&room=abcdefghijklmnopqrstuv").is_ok());
+        assert!(super::parse_link("nonsense").unwrap_err().to_string().contains("not a link"));
+    }
+}

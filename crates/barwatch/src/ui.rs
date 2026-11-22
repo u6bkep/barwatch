@@ -1,14 +1,14 @@
-//! The window: join a party, browse local replays, settings.
+//! The window: be in a room, browse local replays, settings.
 
-use crate::backend::{Backend, Cmd, Msg};
-use crate::client::{self, Stage};
+use crate::backend::{self, Backend, Cmd, Msg};
+use crate::client::{self, Pick, Stage};
 use crate::config::Config;
 use crate::datadir::{self, DataDir};
 use crate::position::{self, Position};
 use crate::replays::LocalReplay;
 use crate::timeline::{self, icons, Icons, Timeline};
 use crate::uri;
-use barwatch_core::api::{self, JumpView, Link, Phase, ReplayInfo, SessionView, TimelineView, ViewerState};
+use barwatch_core::api::{self, Archived, HistoryEntry, JumpView, Link, Phase, ReplayInfo, RoomView, TimelineView, ViewerState};
 use damascene_core::prelude::*;
 use damascene_core::widgets::{tabs, text_input};
 use std::collections::{HashMap, HashSet};
@@ -17,22 +17,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
-const TAB_PARTY: &str = "party";
+const TAB_ROOM: &str = "room";
 const TAB_REPLAYS: &str = "replays";
 const TAB_SETTINGS: &str = "settings";
 const REPLAY_ROW_HEIGHT: f32 = 52.0;
 const CHAT_HINT: &str = "In game chat: !skip 14:00   !skip +2m   !pause   !resume   !speed 2";
+/// Rooms offered by *Watch together*: the server's most recently used.
+const TOGETHER_ROOMS: usize = 6;
 
 /// How often the window is drawn while the game line moves: the clock on it
 /// counts seconds, and the line creeps a pixel in about as long.
 const GAME_LINE_FRAME: Duration = Duration::from_millis(250);
 
-/// The party this app is in (or was, until the user dismisses it).
-struct Party {
+/// The room this app is in (or was, until the user dismisses it).
+struct Room {
     server: Url,
-    session: String,
+    /// The id in the room's link.
+    id: String,
     update: Option<client::Update>,
-    /// The client has stopped: left, failed, or the party is gone.
+    /// The client has stopped: left, failed, or the room is gone.
     over: bool,
     /// The statistics timeline, from the first time this viewer is in game.
     watch: Option<Watch>,
@@ -40,12 +43,14 @@ struct Party {
 }
 
 /// The timeline of the game this viewer is watching (DESIGN.md §5.7). It is
-/// kept for the whole party, so that what the viewer chose to look at stays
-/// when the replay is started again; it is on screen while this viewer is in
-/// the game, and after the game has ended for those who were.
+/// kept while the room plays one replay, so that what the viewer chose to look
+/// at stays when the replay is started again; it is on screen while this viewer
+/// is in the game, and after the game has ended for those who were.
 struct Watch {
+    /// The replay it is of (`RoomReplay::key`).
+    replay: String,
     timeline: Timeline,
-    /// The run of the party this viewer was last in the game of.
+    /// The run of the room this viewer was last in the game of.
     run: u32,
     /// This viewer's engine was in the running game at the last update.
     in_game: bool,
@@ -53,7 +58,7 @@ struct Watch {
     applied: Option<Arc<TimelineView>>,
     /// The jump the server named last. One that differs from it is new and
     /// under way; the one already named when this viewer got into the game is
-    /// not (the engine is catching up to the party, not to that jump).
+    /// not (the engine is catching up to the room, not to that jump).
     jump_seen: Option<JumpView>,
     /// The engine's report before the latest, to tell how fast it goes.
     last_report: Option<Position>,
@@ -73,17 +78,27 @@ struct Art {
     icons: Icons,
 }
 
-impl Party {
-    fn new(server: Url, session: String) -> Party {
-        Party { server, session, update: None, over: false, watch: None, art: Art::default() }
+impl Room {
+    fn new(server: Url, id: String) -> Room {
+        Room { server, id, update: None, over: false, watch: None, art: Art::default() }
+    }
+
+    fn view(&self) -> Option<&RoomView> {
+        self.update.as_ref()?.room.as_ref()
+    }
+
+    /// The statistics of the room's current replay, once the server has said any.
+    fn timeline(&self) -> Option<&Arc<TimelineView>> {
+        let update = self.update.as_ref()?;
+        let key = update.room.as_ref()?.replay.as_ref().map(|r| &r.key);
+        update.timeline.as_ref().filter(|t| t.replay.as_ref() == key)
     }
 
     /// Whether this viewer's engine is in the running game: open, and started
     /// for this run (one left open after the last run ended is not).
     fn in_game(&self) -> bool {
         self.update.as_ref().is_some_and(|u| {
-            u.stage == Stage::Playing
-                && u.session.as_ref().is_some_and(|s| s.phase == Phase::Running && u.engine_run == Some(s.run))
+            u.stage == Stage::Playing && u.room.as_ref().is_some_and(|r| r.phase == Phase::Running && u.engine_run == Some(r.run))
         })
     }
 
@@ -91,20 +106,30 @@ impl Party {
     /// was when it ended (the whole game is then there to look back over; a
     /// viewer who was not in it may still want to watch it unspoiled).
     fn watching(&self) -> Option<&Watch> {
-        let session = self.update.as_ref()?.session.as_ref()?;
-        self.watch.as_ref().filter(|w| w.run == session.run && (self.in_game() || session.ended))
+        let room = self.view()?;
+        let key = &room.replay.as_ref()?.key;
+        self.watch.as_ref().filter(|w| &w.replay == key && w.run == room.run && (self.in_game() || room.ended))
     }
 
-    /// Takes in what an update says for the timeline: a new run, new
-    /// statistics, a jump.
+    /// Takes in what an update says for the timeline: another replay, a new
+    /// run, new statistics, a jump.
     fn sync_watch(&mut self) {
         let in_game = self.in_game();
+        let statistics = self.timeline().cloned();
         let Some(update) = &self.update else { return };
-        let Some(session) = &update.session else { return };
+        let Some(room) = &update.room else { return };
+        // Another replay: what was watched, and the pictures read for it, are of
+        // the one before.
+        if self.watch.as_ref().is_some_and(|w| room.replay.as_ref().is_none_or(|r| r.key != w.replay)) {
+            self.watch = None;
+            self.art = Art::default();
+        }
+        let Some(replay) = &room.replay else { return };
         if in_game && self.watch.is_none() {
             self.watch = Some(Watch {
-                timeline: Timeline::waiting(replay_length(session) as f32),
-                run: session.run,
+                replay: replay.key.clone(),
+                timeline: Timeline::waiting(replay_length(&replay.info) as f32),
+                run: room.run,
                 in_game: false,
                 applied: None,
                 jump_seen: None,
@@ -114,16 +139,16 @@ impl Party {
         let Some(watch) = &mut self.watch else { return };
         // This viewer's engine has just got into a game: a new run, or the
         // same one again. Either way it starts from the beginning.
-        if in_game && (!watch.in_game || watch.run != session.run) {
+        if in_game && (!watch.in_game || watch.run != room.run) {
             watch.timeline.restart();
             watch.timeline.await_pace();
-            watch.run = session.run;
-            watch.jump_seen = session.jump;
+            watch.run = room.run;
+            watch.jump_seen = room.jump;
             watch.last_report = None;
         }
         watch.in_game = in_game;
         // A new report: an engine that went much further than its speed
-        // allows since the one before is running ahead to the party.
+        // allows since the one before is running ahead to the room.
         if let Some(position) = update.position.filter(|p| watch.last_report.is_none_or(|l| l.seen != p.seen)) {
             if let Some(last) = watch.last_report {
                 watch.timeline.set_catching_up(catching_up(&last, &position));
@@ -134,16 +159,16 @@ impl Party {
             // running ahead now.
             watch.timeline.set_catching_up(false);
         }
-        if let Some(view) = &update.timeline {
+        if let Some(view) = &statistics {
             if !watch.applied.as_ref().is_some_and(|applied| Arc::ptr_eq(applied, view)) {
-                let (feed, data) = timeline::statistics(view, replay_length(session));
+                let (feed, data) = timeline::statistics(view, replay_length(&replay.info));
                 watch.timeline.set_statistics(feed, data);
                 watch.applied = Some(view.clone());
             }
         }
-        if watch.run == session.run && session.jump != watch.jump_seen {
-            watch.jump_seen = session.jump;
-            if let (Some(jump), true) = (session.jump, in_game) {
+        if watch.run == room.run && room.jump != watch.jump_seen {
+            watch.jump_seen = room.jump;
+            if let (Some(jump), true) = (room.jump, in_game) {
                 watch.timeline.show_jump(jump.target_s as f32);
             }
         }
@@ -156,8 +181,8 @@ impl Party {
     fn tick_watch(&mut self) {
         let in_game = self.in_game();
         let (Some(update), Some(watch)) = (&self.update, &mut self.watch) else { return };
-        let Some(session) = update.session.as_ref().filter(|s| s.run == watch.run) else { return };
-        if session.ended {
+        let Some(room) = update.room.as_ref().filter(|r| r.run == watch.run) else { return };
+        if room.ended {
             // The replay has played to its end, wherever the last frame fell.
             watch.timeline.set_game(f32::MAX);
         } else if let Some(seconds) = update.position.and_then(|p| p.seconds_at(Instant::now())) {
@@ -171,7 +196,7 @@ impl Party {
     fn game_line_moves(&self) -> bool {
         let Some(update) = &self.update else { return false };
         let running = update.position.is_some_and(|p| !p.report.paused && p.report.speed > 0.0 && p.is_fresh(Instant::now()));
-        running && !update.session.as_ref().is_some_and(|s| s.ended)
+        running && !update.room.as_ref().is_some_and(|r| r.ended)
     }
 
     /// Before every frame: marker pictures and unit names, read from the
@@ -192,7 +217,8 @@ impl Party {
             }
         }
         let installed = matches!(update.stage, Stage::Ready | Stage::Playing | Stage::Closed);
-        let Some(session) = update.session.as_ref().filter(|_| installed && self.art.loading.is_none()) else { return };
+        let replay = update.room.as_ref().and_then(|r| r.replay.as_ref()).filter(|r| r.key == watch.replay);
+        let Some(replay) = replay.filter(|_| installed && self.art.loading.is_none()) else { return };
         let same = |a: &Option<Arc<TimelineView>>, b: &Option<Arc<TimelineView>>| match (a, b) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
@@ -209,8 +235,30 @@ impl Party {
         }
         self.art.started = true;
         self.art.asked.extend(wanted.iter().cloned());
-        self.art.loading = Some(icons::Loading::start(data.root.clone(), session.replay.game.clone(), wanted, wake));
+        self.art.loading = Some(icons::Loading::start(data.root.clone(), replay.info.game.clone(), wanted, wake));
     }
+}
+
+/// *Watch together* from My replays, outside a room: which of the paired
+/// server's rooms to play the replay in, or a new one.
+struct Together {
+    path: PathBuf,
+    /// The replay's map, for the dialog's words.
+    map: String,
+    server: Url,
+    token: String,
+    /// The server's rooms, once it has answered.
+    rooms: Option<Result<Vec<RoomView>, String>>,
+    /// The new room's name, as typed.
+    name: String,
+    /// A new room has been asked for.
+    creating: bool,
+}
+
+/// A replay sent to the archive from My replays.
+enum Archiving {
+    Sending,
+    Done(Archived),
 }
 
 pub struct Ui {
@@ -222,13 +270,19 @@ pub struct Ui {
     toasts: Vec<ToastSpec>,
     /// Keys to move keyboard focus to on the next frame.
     focus_requests: Vec<String>,
+    /// Pages to open in the browser (a game's page on the stats service).
+    link_opens: Vec<String>,
     clipboard: Option<arboard::Clipboard>,
 
     /// The invite link being typed or pasted.
     link: String,
-    party: Option<Party>,
+    room: Option<Room>,
+    /// A BAR replay link or id being typed or pasted into the room.
+    bar_link: String,
     /// A link that arrived from outside (a browser) and awaits the user's consent.
     pending: Option<Link>,
+    together: Option<Together>,
+    archives: HashMap<PathBuf, Archiving>,
 
     replays: Arc<Vec<LocalReplay>>,
     /// Lowercased search text per replay, parallel to `replays`.
@@ -238,8 +292,6 @@ pub struct Ui {
     /// Indices into `replays` that pass the filter, in list order.
     visible: Arc<Vec<usize>>,
     selected: Option<usize>,
-    /// An upload to a server is in flight.
-    creating: bool,
 
     /// Map name → picture; `None` once a picture turned out to be unavailable.
     pictures: HashMap<String, Option<Image>>,
@@ -247,6 +299,8 @@ pub struct Ui {
     name: String,
     data_dir: String,
     link_status: uri::Status,
+    /// Settings are written to disk when they change (not in canned scenes).
+    persist: bool,
 }
 
 impl Ui {
@@ -257,24 +311,28 @@ impl Ui {
             data_dir: data.root.display().to_string(),
             data,
             cfg,
-            tab: TAB_PARTY.into(),
+            tab: TAB_ROOM.into(),
             selection: Selection::default(),
             toasts: Vec::new(),
             focus_requests: Vec::new(),
+            link_opens: Vec::new(),
             clipboard: None,
             link: String::new(),
-            party: None,
+            room: None,
+            bar_link: String::new(),
             pending: opened,
+            together: None,
+            archives: HashMap::new(),
             replays: Arc::new(Vec::new()),
             haystacks: Vec::new(),
             scanning: false,
             filter: String::new(),
             visible: Arc::new(Vec::new()),
             selected: None,
-            creating: false,
             pictures: HashMap::new(),
             name,
             link_status: uri::status(),
+            persist: true,
         };
         ui.scan();
         ui
@@ -304,22 +362,30 @@ impl Ui {
         }
     }
 
-    fn join(&mut self, server: Url, session: String) {
+    fn join(&mut self, server: Url, room: String) {
         let settings = client::Settings { name: self.name.clone(), data: self.data.clone(), headless: false };
-        self.backend.send(Cmd::Join { server: server.clone(), session: session.clone(), settings });
-        self.party = Some(Party::new(server, session));
-        self.tab = TAB_PARTY.into();
+        self.backend.send(Cmd::Join { server: server.clone(), room: room.clone(), settings });
+        self.room = Some(Room::new(server, room));
+        self.tab = TAB_ROOM.into();
         self.link.clear();
+        self.bar_link.clear();
+    }
+
+    /// Joins `room` and makes the replay at `path` its replay.
+    fn join_and_pick(&mut self, server: Url, room: String, path: PathBuf) {
+        self.join(server, room);
+        // Queued behind the join: the client takes it once it is in.
+        self.backend.send(Cmd::Room(client::Command::Pick(Pick::File(path))));
     }
 
     fn open_link(&mut self, link: Link) {
         match link {
-            Link::Join { server, session } => self.join(server, session),
+            Link::Join { server, room } => self.join(server, room),
             Link::Pair { server, token } => {
                 self.cfg.pair(server.as_str(), &token);
                 self.save_config();
                 self.toasts.push(ToastSpec::success(format!(
-                    "Paired with {}. You can now start watch parties from My replays.",
+                    "Paired with {}. You can now make rooms and archive replays from My replays.",
                     host_of(&server)
                 )));
             }
@@ -327,6 +393,9 @@ impl Ui {
     }
 
     fn save_config(&mut self) {
+        if !self.persist {
+            return;
+        }
         if let Err(e) = self.cfg.save() {
             self.toasts.push(ToastSpec::error(format!("Could not save settings: {e:#}")));
         }
@@ -343,27 +412,45 @@ impl Ui {
     }
 
     fn invite_link(&self) -> Option<String> {
-        let party = self.party.as_ref()?;
-        api::invite_url(&party.server, &party.session).ok().map(String::from)
+        let room = self.room.as_ref()?;
+        api::invite_url(&room.server, &room.id).ok().map(String::from)
+    }
+
+    /// The room, while the app is in it (not after it left or lost it).
+    fn live_room(&self) -> Option<&Room> {
+        self.room.as_ref().filter(|r| !r.over)
+    }
+
+    fn to_room(&self, command: client::Command) {
+        self.backend.send(Cmd::Room(command));
     }
 
     fn apply(&mut self, msg: Msg) {
         match msg {
-            Msg::Session(update) => {
+            Msg::Room(update) => {
                 if let Some(notice) = &update.notice {
                     self.toasts.push(ToastSpec::warning(notice.clone()));
                 }
-                if let Some(map) = update.session.as_ref().map(|s| s.replay.map.clone()) {
+                if let Some(map) = update.room.as_ref().and_then(|r| r.replay.as_ref()).map(|r| r.info.map.clone()) {
                     self.want_picture(&map);
                 }
-                if let Some(party) = &mut self.party {
-                    party.update = Some(*update);
-                    party.sync_watch();
+                let Some(room) = &mut self.room else { return };
+                let server = room.server.to_string();
+                // Remembered for the Join tab; forgotten once the server says it is gone.
+                let changed = match (&update.stage, &update.room) {
+                    (Stage::Gone, _) => self.cfg.forget_room(&server, &room.id),
+                    (_, Some(view)) => self.cfg.remember_room(&server, &room.id, &view.name),
+                    _ => false,
+                };
+                room.update = Some(*update);
+                room.sync_watch();
+                if changed {
+                    self.save_config();
                 }
             }
-            Msg::SessionEnded => {
-                if let Some(party) = &mut self.party {
-                    party.over = true;
+            Msg::RoomEnded => {
+                if let Some(room) = &mut self.room {
+                    room.over = true;
                 }
             }
             Msg::Replays(batch) => {
@@ -378,20 +465,40 @@ impl Ui {
                 let image = picture.map(|p| Image::from_rgba8(p.width, p.height, p.rgba));
                 self.pictures.insert(map, image);
             }
-            Msg::Created { server, id } => {
-                self.creating = false;
-                if let Ok(invite) = api::invite_url(&server, &id) {
-                    self.copy(invite.as_str(), "Invite link");
+            Msg::Rooms { server, rooms } => {
+                if let Some(together) = self.together.as_mut().filter(|t| t.server == server) {
+                    together.rooms = Some(rooms);
                 }
-                self.join(server, id);
             }
-            Msg::CreateFailed(e) => {
-                self.creating = false;
-                self.toasts.push(ToastSpec::error(e));
+            Msg::RoomCreated { server, room } => {
+                let Some(together) = self.together.take_if(|t| t.server == server && t.creating) else { return };
+                match room {
+                    Ok(room) => {
+                        if let Ok(invite) = api::invite_url(&server, &room.id) {
+                            self.copy(invite.as_str(), "The new room's link");
+                        }
+                        self.join_and_pick(server, room.id, together.path);
+                    }
+                    Err(e) => {
+                        self.toasts.push(ToastSpec::error(e));
+                        self.together = Some(Together { creating: false, ..together });
+                    }
+                }
             }
+            Msg::Archived { path, result } => match result {
+                Ok(archived) => {
+                    self.toasts.push(ToastSpec::success("The replay is in the archive"));
+                    self.archives.insert(path, Archiving::Done(archived));
+                }
+                Err(e) => {
+                    self.archives.remove(&path);
+                    self.toasts.push(ToastSpec::error(e));
+                }
+            },
+            Msg::Failed(e) => self.toasts.push(ToastSpec::error(e)),
             // A link opened while this window was up: it asks here, like one that
             // started the app.
-            Msg::Opened(Some(text)) => match Link::parse_any(&text) {
+            Msg::Opened(Some(text)) => match uri::parse_link(&text) {
                 Ok(link) => self.pending = Some(link),
                 Err(e) => self.toasts.push(ToastSpec::error(format!("That link could not be opened: {e:#}"))),
             },
@@ -399,10 +506,14 @@ impl Ui {
         }
     }
 
-    /// The server new parties are created on: the one paired last.
-    fn create_server(&self) -> Option<(Url, String)> {
+    /// The server rooms are made on and replays archived to: the one paired last.
+    fn paired_server(&self) -> Option<(Url, String)> {
         let s = self.cfg.servers.last()?;
         Some((api::parse_server(&s.url).ok()?, s.token.clone()))
+    }
+
+    fn selected_replay(&self) -> Option<&LocalReplay> {
+        self.selected.and_then(|i| self.replays.get(i))
     }
 
     fn apply_settings(&mut self) {
@@ -426,53 +537,182 @@ impl Ui {
         }
         self.toasts.push(ToastSpec::success("Settings saved"));
     }
+
+    /// The events of the room tab, inside a room and on the way into one.
+    /// `true` if `event` was one of them.
+    fn on_room_event(&mut self, event: &UiEvent) -> bool {
+        let clicked = matches!(event.kind, UiEventKind::Click | UiEventKind::Activate);
+        if event.is_click_or_activate("join") || text_input::submitted(event, "link") {
+            match uri::parse_link(&self.link) {
+                // Typed or pasted by the user: that is the consent.
+                Ok(link) => self.open_link(link),
+                Err(e) => self.toasts.push(ToastSpec::error(format!("That link does not work: {e:#}"))),
+            }
+        } else if let Some(i) = event.route_index::<usize>("recent").filter(|_| clicked) {
+            let entry = self.cfg.rooms.get(i).cloned();
+            if let Some((server, entry)) = entry.and_then(|e| Some((api::parse_server(&e.server).ok()?, e))) {
+                self.join(server, entry.room);
+            }
+        } else if let Some(i) = event.route_index::<usize>("forget").filter(|_| clicked) {
+            if i < self.cfg.rooms.len() {
+                self.cfg.rooms.remove(i);
+                self.save_config();
+            }
+        } else if event.is_click_or_activate("room:start") {
+            self.to_room(client::Command::Start);
+        } else if event.is_click_or_activate("room:stop") {
+            self.to_room(client::Command::Stop);
+        } else if event.is_click_or_activate("room:rejoin") {
+            self.to_room(client::Command::Rejoin);
+        } else if event.is_click_or_activate("room:leave") {
+            self.to_room(client::Command::Leave);
+            self.room = None;
+        } else if event.is_click_or_activate("room:copy") {
+            if let Some(link) = self.invite_link() {
+                self.copy(&link, "The room's link");
+            }
+        } else if event.is_click_or_activate("room:gex") {
+            let url = self.room.as_ref().and_then(Room::view).and_then(|r| r.replay.as_ref()?.match_url.clone());
+            self.link_opens.extend(url);
+        } else if event.is_click_or_activate("room:pick-bar") || text_input::submitted(event, "bar-link") {
+            let text = self.bar_link.trim().to_owned();
+            if text.is_empty() {
+                self.toasts.push(ToastSpec::info("Paste a link to a replay on BAR's site, or its id."));
+            } else {
+                self.to_room(client::Command::Pick(Pick::Bar(text)));
+                self.bar_link.clear();
+            }
+        } else if let Some(i) = event.route_index::<usize>("history-watch").filter(|_| clicked) {
+            let key = self.room.as_ref().and_then(Room::view).and_then(|r| r.history.get(i)).map(|h| h.key.clone());
+            if let Some(key) = key {
+                self.to_room(client::Command::Pick(Pick::History(key)));
+            }
+        } else if let Some(i) = event.route_index::<usize>("history-gex").filter(|_| clicked) {
+            let url = self.room.as_ref().and_then(Room::view).and_then(|r| r.history.get(i)?.match_url.clone());
+            self.link_opens.extend(url);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// The events of My replays and of the *Watch together* dialog.
+    fn on_replays_event(&mut self, event: &UiEvent) -> bool {
+        let clicked = matches!(event.kind, UiEventKind::Click | UiEventKind::Activate);
+        if event.is_click_or_activate("replays:refresh") {
+            self.scan();
+        } else if event.is_click_or_activate("replays:play") {
+            let path = self.selected_replay().map(|r| r.path.clone());
+            if let (Some(path), Some(_)) = (path, self.live_room()) {
+                self.to_room(client::Command::Pick(Pick::File(path)));
+                self.tab = TAB_ROOM.into();
+            }
+        } else if event.is_click_or_activate("replays:together") {
+            let chosen = self.selected_replay().and_then(|r| Some((r.path.clone(), r.info.as_ref()?.map.clone())));
+            if let (Some((path, map)), Some((server, token))) = (chosen, self.paired_server()) {
+                self.backend.send(Cmd::ListRooms(backend::Paired { server: server.clone(), token: token.clone() }));
+                self.together = Some(Together { path, map, server, token, rooms: None, name: String::new(), creating: false });
+            }
+        } else if event.is_click_or_activate("replays:archive") {
+            let path = self.selected_replay().map(|r| r.path.clone());
+            if let (Some(path), Some((server, token))) = (path, self.paired_server()) {
+                if !self.archives.contains_key(&path) {
+                    self.archives.insert(path.clone(), Archiving::Sending);
+                    self.backend.send(Cmd::Archive { server: backend::Paired { server, token }, path });
+                }
+            }
+        } else if event.is_click_or_activate("replays:gex") {
+            let url = self.selected_replay().and_then(|r| match self.archives.get(&r.path) {
+                Some(Archiving::Done(a)) => a.match_url.clone(),
+                _ => None,
+            });
+            self.link_opens.extend(url);
+        } else if let Some(index) = event.route_index::<usize>("replay").filter(|_| clicked) {
+            self.selected = Some(index);
+            if let Some(map) = self.replays.get(index).and_then(|r| r.info.as_ref()).map(|i| i.map.clone()) {
+                self.want_picture(&map);
+            }
+        } else if let Some(i) = event.route_index::<usize>("pick-room").filter(|_| clicked) {
+            let chosen = self.together.as_ref().and_then(|t| match &t.rooms {
+                Some(Ok(rooms)) => rooms.get(i).map(|r| (t.server.clone(), r.id.clone(), t.path.clone())),
+                _ => None,
+            });
+            if let Some((server, room, path)) = chosen {
+                self.together = None;
+                self.join_and_pick(server, room, path);
+            }
+        } else if event.is_click_or_activate("together:create") || text_input::submitted(event, "room-name") {
+            if let Some(t) = self.together.as_mut().filter(|t| !t.creating) {
+                t.creating = true;
+                let paired = backend::Paired { server: t.server.clone(), token: t.token.clone() };
+                self.backend.send(Cmd::CreateRoom { server: paired, name: t.name.clone() });
+            }
+        } else if event.is_click_or_activate("together:cancel")
+            || (event.kind == UiEventKind::Click && event.is_route("together:dismiss"))
+        {
+            self.together = None;
+        } else {
+            return false;
+        }
+        true
+    }
 }
 
 /// Setters for canned scenes ([`crate::fixtures`]).
 impl Ui {
+    /// A canned scene: settings stay in memory, whatever happens in it.
+    pub fn fixture_in_memory(&mut self) {
+        self.persist = false;
+    }
+
     pub fn fixture_done_scanning(&mut self) {
         self.scanning = false;
     }
 
-    pub fn fixture_party(&mut self, server: Url, update: client::Update) {
-        let session = update.session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-        self.party = Some(Party::new(server, session));
+    pub fn fixture_room(&mut self, server: Url, update: client::Update) {
+        let id = update.room.as_ref().map(|r| r.id.clone()).unwrap_or_default();
+        self.room = Some(Room::new(server, id));
         self.fixture_update(update);
-        // One report is all a canned scene has: its game goes at the party's
+        // One report is all a canned scene has: its game goes at the room's
         // pace unless the scene says otherwise.
         if let Some(timeline) = self.fixture_timeline() {
             timeline.set_catching_up(false);
         }
     }
 
-    /// The next thing the party's client says, as the window takes it in.
+    /// The next thing the room's client says, as the window takes it in.
     pub fn fixture_update(&mut self, update: client::Update) {
-        self.apply(Msg::Session(Box::new(update)));
+        self.apply(Msg::Room(Box::new(update)));
         self.toasts.clear();
-        if let Some(party) = &mut self.party {
-            party.tick_watch();
+        if let Some(room) = &mut self.room {
+            room.tick_watch();
         }
     }
 
-    /// The party's timeline, once this viewer has been in game.
+    /// The room's client has ended (left, failed, or the room is gone).
+    pub fn fixture_room_ended(&mut self) {
+        self.apply(Msg::RoomEnded);
+    }
+
+    /// The room's timeline, once this viewer has been in game.
     pub fn fixture_timeline(&mut self) -> Option<&mut Timeline> {
-        self.party.as_mut()?.watch.as_mut().map(|w| &mut w.timeline)
+        self.room.as_mut()?.watch.as_mut().map(|w| &mut w.timeline)
     }
 
     /// DEVELOPMENT: waits for the marker pictures of the installed game, for a
     /// one-frame render that has no later frame to show them in.
     pub fn fixture_wait_for_art(&mut self, timeout: Duration) {
-        let Some(party) = &mut self.party else { return };
-        party.tick_art(&self.data, || {});
-        if let Some(loading) = party.art.loading.take() {
+        let Some(room) = &mut self.room else { return };
+        room.tick_art(&self.data, || {});
+        if let Some(loading) = room.art.loading.take() {
             let (tx, rx) = std::sync::mpsc::channel();
             let _ = tx.send(loading.wait(timeout));
             // Handed back as a finished load, for `tick_art` to take in.
             if let Ok(Some(result)) = rx.recv() {
-                party.art.loading = Some(icons::Loading::ready(result));
+                room.art.loading = Some(icons::Loading::ready(result));
             }
         }
-        party.tick_art(&self.data, || {});
+        room.tick_art(&self.data, || {});
     }
 
     pub fn fixture_replays(&mut self, replays: Vec<LocalReplay>, selected: Option<usize>) {
@@ -481,6 +721,21 @@ impl Ui {
         self.refilter();
         self.selected = selected;
         self.tab = TAB_REPLAYS.into();
+    }
+
+    /// The selected replay has been sent to the archive.
+    pub fn fixture_archived(&mut self, archived: Archived) {
+        if let Some(path) = self.selected_replay().map(|r| r.path.clone()) {
+            self.archives.insert(path, Archiving::Done(archived));
+        }
+    }
+
+    /// *Watch together* open on the selected replay, the server having answered with `rooms`.
+    pub fn fixture_together(&mut self, rooms: Vec<RoomView>) {
+        let Some(replay) = self.selected_replay() else { return };
+        let (path, map) = (replay.path.clone(), replay.info.as_ref().map(|i| i.map.clone()).unwrap_or_default());
+        let Some((server, token)) = self.paired_server() else { return };
+        self.together = Some(Together { path, map, server, token, rooms: Some(Ok(rooms)), name: String::new(), creating: false });
     }
 
     pub fn fixture_tab(&mut self, tab: &str) {
@@ -510,6 +765,15 @@ fn when(unix: u64) -> String {
         .unwrap_or_default()
 }
 
+/// `text` cut to `chars` characters, with an ellipsis when it was longer.
+fn short(text: &str, chars: usize) -> String {
+    if text.chars().count() <= chars {
+        text.to_owned()
+    } else {
+        format!("{}…", text.chars().take(chars.saturating_sub(1)).collect::<String>())
+    }
+}
+
 fn versus(info: &ReplayInfo) -> String {
     let sides: Vec<String> = info.teams.iter().map(|t| t.join(", ")).collect();
     if sides.is_empty() {
@@ -524,9 +788,9 @@ impl App for Ui {
         for msg in self.backend.drain() {
             self.apply(msg);
         }
-        if let Some(party) = &mut self.party {
-            party.tick_watch();
-            party.tick_art(&self.data, self.backend.waker());
+        if let Some(room) = &mut self.room {
+            room.tick_watch();
+            room.tick_art(&self.data, self.backend.waker());
         }
     }
 
@@ -534,21 +798,18 @@ impl App for Ui {
         let body = match self.tab.as_str() {
             TAB_REPLAYS => self.replays_view(),
             TAB_SETTINGS => self.settings_view(),
-            _ => self.party_view(cx),
+            _ => self.room_tab(cx),
         };
         // The timeline's open list hangs from the timeline: only while that is drawn.
         let layers = self.watching().map(|w| w.timeline.layers()).unwrap_or_default();
+        let dialogs = [self.pending.as_ref().map(consent_dialog), self.together.as_ref().map(|t| self.together_dialog(t))];
         overlays(
             page([
-                tabs_list(
-                    "tab",
-                    &self.tab,
-                    [(TAB_PARTY, "Watch party"), (TAB_REPLAYS, "My replays"), (TAB_SETTINGS, "Settings")],
-                ),
+                tabs_list("tab", &self.tab, [(TAB_ROOM, "Room"), (TAB_REPLAYS, "My replays"), (TAB_SETTINGS, "Settings")]),
                 body,
             ])
             .gap(tokens::SPACE_4),
-            layers.into_iter().map(Some).chain([self.pending.as_ref().map(consent_dialog)]),
+            layers.into_iter().map(Some).chain(dialogs),
         )
     }
 
@@ -568,6 +829,10 @@ impl App for Ui {
         let mut requests = std::mem::take(&mut self.focus_requests);
         requests.extend(self.watching_mut().and_then(|w| w.timeline.take_focus_request()));
         requests
+    }
+
+    fn drain_link_opens(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.link_opens)
     }
 
     fn on_event(&mut self, event: UiEvent, cx: &EventCx) {
@@ -600,50 +865,15 @@ impl App for Ui {
         // The timeline: everything under its own keys, and Escape at the window.
         if let Some(watch) = self.watching_mut() {
             if let Some(timeline::Action::Jump(seconds)) = watch.timeline.on_event(&event, cx) {
-                self.backend.send(Cmd::Session(client::Command::Jump(seconds.round().max(0.0) as u32)));
+                self.backend.send(Cmd::Room(client::Command::Jump(seconds.round().max(0.0) as u32)));
             }
         }
 
-        // Watch party.
-        if event.is_click_or_activate("join") || text_input::submitted(&event, "link") {
-            match Link::parse_any(&self.link) {
-                // Typed or pasted by the user: that is the consent.
-                Ok(link) => self.open_link(link),
-                Err(e) => self.toasts.push(ToastSpec::error(format!("That link does not work: {e:#}"))),
-            }
+        if self.on_room_event(&event) || self.on_replays_event(&event) {
             return;
         }
-        if event.is_click_or_activate("party:start") {
-            self.backend.send(Cmd::Session(client::Command::Start));
-        } else if event.is_click_or_activate("party:rejoin") {
-            self.backend.send(Cmd::Session(client::Command::Rejoin));
-        } else if event.is_click_or_activate("party:leave") {
-            self.backend.send(Cmd::Session(client::Command::Leave));
-            self.party = None;
-        } else if event.is_click_or_activate("party:copy") {
-            if let Some(link) = self.invite_link() {
-                self.copy(&link, "Invite link");
-            }
-        }
-        // My replays.
-        else if event.is_click_or_activate("replays:refresh") {
-            self.scan();
-        } else if event.is_click_or_activate("replays:watch") {
-            let chosen = self.selected.and_then(|i| self.replays.get(i)).map(|r| r.path.clone());
-            if let (Some(path), Some((server, token)), false) = (chosen, self.create_server(), self.creating) {
-                self.creating = true;
-                self.backend.send(Cmd::Create { server, token, path });
-            }
-        } else if let Some(index) =
-            event.route_index::<usize>("replay").filter(|_| matches!(event.kind, UiEventKind::Click | UiEventKind::Activate))
-        {
-            self.selected = Some(index);
-            if let Some(map) = self.replays.get(index).and_then(|r| r.info.as_ref()).map(|i| i.map.clone()) {
-                self.want_picture(&map);
-            }
-        }
         // Settings.
-        else if event.is_click_or_activate("settings:save") {
+        if event.is_click_or_activate("settings:save") {
             self.apply_settings();
         } else if event.is_click_or_activate("settings:detect") {
             self.data_dir = datadir::find(None).root.display().to_string();
@@ -664,8 +894,12 @@ impl App for Ui {
 
         // Text fields: each folds only what was routed to it.
         text_input::apply_event(&mut self.link, &mut self.selection, &event, "link");
+        text_input::apply_event(&mut self.bar_link, &mut self.selection, &event, "bar-link");
         text_input::apply_event(&mut self.name, &mut self.selection, &event, "name");
         text_input::apply_event(&mut self.data_dir, &mut self.selection, &event, "data-dir");
+        if let Some(t) = &mut self.together {
+            text_input::apply_event(&mut t.name, &mut self.selection, &event, "room-name");
+        }
         if text_input::apply_event(&mut self.filter, &mut self.selection, &event, "filter") {
             self.refilter();
         }
@@ -685,8 +919,10 @@ impl barwatch_host::WinitWgpuApp for Ui {
 
 /// A focused text field receives Tab as a raw key instead of giving up focus, so
 /// the fields hand focus to their neighbours here: (field, previous, next).
-const FIELD_NEIGHBOURS: [(&str, &str, &str); 4] = [
+const FIELD_NEIGHBOURS: [(&str, &str, &str); 6] = [
     ("link", "tab:tab:settings", "join"),
+    ("bar-link", "tab:tab:settings", "room:pick-bar"),
+    ("room-name", "together:cancel", "together:create"),
     ("filter", "tab:tab:settings", "replays:refresh"),
     ("name", "tab:tab:settings", "data-dir"),
     ("data-dir", "name", "settings:detect"),
@@ -715,9 +951,9 @@ fn declines_consent(event: &UiEvent) -> bool {
 fn consent_dialog(link: &Link) -> El {
     let (title, description, action) = match link {
         Link::Join { server, .. } => (
-            "Join this watch party?",
+            "Join this room?",
             format!(
-                "A link asks barwatch to join a watch party on {}. It will install what the replay needs and start Beyond All Reason as a spectator.",
+                "A link asks barwatch to join a room on {}. It will install what the room's replays need and start Beyond All Reason as a spectator when the room plays.",
                 host_of(server)
             ),
             "Join",
@@ -725,7 +961,7 @@ fn consent_dialog(link: &Link) -> El {
         Link::Pair { server, .. } => (
             "Pair with this server?",
             format!(
-                "A link asks to pair barwatch with {}. Pairing lets this app start watch parties there from your own replays.",
+                "A link asks to pair barwatch with {}. Pairing lets this app make rooms there and send your replays to its archive.",
                 host_of(server)
             ),
             "Pair",
@@ -741,15 +977,15 @@ fn consent_dialog(link: &Link) -> El {
 }
 
 impl Ui {
-    /// The timeline, while it is on screen: in the party view, with no dialog over it.
+    /// The timeline, while it is on screen: in the room view, with no dialog over it.
     fn watching(&self) -> Option<&Watch> {
-        let shown = self.tab == TAB_PARTY && self.pending.is_none();
-        self.party.as_ref().filter(|_| shown)?.watching()
+        let shown = self.tab == TAB_ROOM && self.pending.is_none() && self.together.is_none();
+        self.room.as_ref().filter(|_| shown)?.watching()
     }
 
     fn watching_mut(&mut self) -> Option<&mut Watch> {
         self.watching()?;
-        self.party.as_mut()?.watch.as_mut()
+        self.room.as_mut()?.watch.as_mut()
     }
 
     fn picture(&self, map: &str, side: f32) -> El {
@@ -765,8 +1001,8 @@ impl Ui {
         }
     }
 
-    /// Map picture beside the replay's description.
-    fn replay_card(&self, info: &ReplayInfo, side: f32) -> El {
+    /// Map picture beside the replay's description, and what goes below it.
+    fn replay_card(&self, info: &ReplayInfo, side: f32, extra: Vec<El>) -> El {
         let mut lines = vec![h3(info.map.clone())];
         for (i, team) in info.teams.iter().enumerate() {
             lines.push(
@@ -786,85 +1022,177 @@ impl Ui {
                 .caption()
                 .muted(),
         );
+        lines.extend(extra);
         row([self.picture(&info.map, side), column(lines).gap(tokens::SPACE_2).fill_width()])
             .gap(tokens::SPACE_4)
             .align(Align::Start)
     }
 
-    fn party_view(&self, cx: &BuildCx) -> El {
-        let Some(party) = &self.party else {
-            return column([
-                card([
-                    card_header([
-                        card_title("Join a watch party"),
-                        card_description("Paste the invite link you were sent, or press the join button on the invite page."),
-                    ]),
-                    card_content([row([
-                        text_input_with(
-                            "link",
-                            &self.link,
-                            &self.selection,
-                            TextInputOpts::default().placeholder("https://…/app/join/…"),
-                        )
-                        .fill_width(),
-                        button("Join").key("join").primary(),
-                    ])
-                    .gap(tokens::SPACE_2)]),
-                ]),
-                text("To start one yourself, pick a replay under My replays.").muted(),
-            ])
-            .gap(tokens::SPACE_4);
-        };
-        let Some(update) = &party.update else {
-            return row([spinner(), text(format!("Connecting to {}…", host_of(&party.server)))])
+    /// The first tab: the room this app is in, or the ways into one.
+    fn room_tab(&self, cx: &BuildCx) -> El {
+        let Some(room) = &self.room else { return self.join_view() };
+        let Some(update) = &room.update else {
+            return row([spinner(), text(format!("Connecting to {}…", host_of(&room.server)))])
                 .gap(tokens::SPACE_3)
                 .align(Align::Center);
         };
+        let Some(view) = &update.room else {
+            // The server never let us in: what it said, and the way out.
+            return column([
+                status_block(update, room.over),
+                row([spacer(), button(if room.over { "Close" } else { "Leave" }).key("room:leave").ghost()]),
+            ])
+            .gap(tokens::SPACE_4);
+        };
         let mut sections: Vec<El> = Vec::new();
-        match (party.watching(), &update.session) {
+        match room.watching() {
             // Watching: the timeline takes the window. What the replay is
-            // shrinks to one line, with the party's buttons on it.
-            (Some(watch), Some(session)) => {
-                sections.push(self.watching_bar(update, session, party.over, watch.timeline.game_state()));
-                if update.stage != Stage::Playing || party.over {
-                    sections.push(status_block(update, party.over));
+            // shrinks to one line, with the room's buttons on it.
+            Some(watch) => {
+                sections.push(self.watching_bar(update, view, room.over, watch.timeline.game_state()));
+                if update.stage != Stage::Playing || room.over {
+                    sections.push(status_block(update, room.over));
                 }
-                let view = column([watch.timeline.view(cx)]).width(Size::Fill(1.0));
-                sections.push(if party.game_line_moves() { view.redraw_within(GAME_LINE_FRAME) } else { view });
+                let timeline = column([watch.timeline.view(cx)]).width(Size::Fill(1.0));
+                sections.push(if room.game_line_moves() { timeline.redraw_within(GAME_LINE_FRAME) } else { timeline });
                 if update.stage == Stage::Playing {
                     sections.push(text(CHAT_HINT).caption().muted().ellipsis());
                 }
             }
-            _ => {
-                if let Some(session) = &update.session {
-                    sections.push(card([card_content([self.replay_card(&session.replay, 200.0)]).pt(tokens::SPACE_5)]));
+            None => {
+                sections.push(room_header(view, &room.server, room.over));
+                sections.push(self.current_replay(view, update));
+                // An empty room's card says it all.
+                if update.stage != Stage::NoReplay || room.over {
+                    sections.push(status_block(update, room.over));
                 }
-                sections.push(status_block(update, party.over));
-                let (start, leave) = party_buttons(update, party.over);
-                sections.push(row(start.into_iter().chain([spacer(), leave])).gap(tokens::SPACE_2).align(Align::Center));
-                if let (Some(view), Some(session), false) = (&update.timeline, &update.session, party.over) {
-                    sections.push(statistics_line(view, session));
+                let actions = room_actions(update, room.over);
+                if !actions.is_empty() {
+                    sections.push(row(actions).gap(tokens::SPACE_2).align(Align::Center));
+                }
+                if let (Some(statistics), Some(replay), false) = (room.timeline(), &view.replay, room.over) {
+                    sections.push(statistics_line(statistics, &replay.info));
                 }
             }
         }
-        if let Some(session) = &update.session {
-            sections.push(viewers_card(session, &update.name));
+        sections.push(members_card(view, &update.member));
+        if !room.over {
+            sections.push(self.pick_card(update));
+        }
+        if !view.history.is_empty() {
+            sections.push(history_card(&view.history, room.over));
         }
         // Air between the content's right edge and the scrollbar's lane.
         scroll(sections)
-            .key("party-scroll")
+            .key("room-scroll")
             .gap(tokens::SPACE_4)
             .padding(Sides { right: tokens::SPACE_2, ..Sides::zero() })
             .fill_height()
     }
 
+    /// Outside a room: paste a link, or go back into a room this app has been in.
+    fn join_view(&self) -> El {
+        let mut sections = vec![card([
+            card_header([
+                card_title("Join a room"),
+                card_description("Paste the room's link you were sent, or press the join button on its invite page."),
+            ]),
+            card_content([row([
+                text_input_with(
+                    "link",
+                    &self.link,
+                    &self.selection,
+                    TextInputOpts::default().placeholder("https://…/app/join/…"),
+                )
+                .fill_width(),
+                button("Join").key("join").primary(),
+            ])
+            .gap(tokens::SPACE_2)]),
+        ])];
+        if !self.cfg.rooms.is_empty() {
+            let rows: Vec<El> = self
+                .cfg
+                .rooms
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let host = api::parse_server(&r.server).map(|s| host_of(&s)).unwrap_or_else(|_| r.server.clone());
+                    item([
+                        item_content([item_title(r.name.clone()), item_description(host)]),
+                        item_actions([
+                            button("Forget").key(format!("forget:{i}")).ghost(),
+                            button("Join").key(format!("recent:{i}")).secondary(),
+                        ]),
+                    ])
+                    .align(Align::Center)
+                })
+                .collect();
+            sections.push(titled_card("Rooms you have been in", [item_group(rows)]));
+        }
+        sections.push(text("To watch one of your own replays with friends, pick it under My replays.").muted().wrap_text());
+        scroll(sections)
+            .key("join-scroll")
+            .gap(tokens::SPACE_4)
+            .padding(Sides { right: tokens::SPACE_2, ..Sides::zero() })
+            .fill_height()
+    }
+
+    /// The room's current replay, or word that it has none yet.
+    fn current_replay(&self, view: &RoomView, update: &client::Update) -> El {
+        match &view.replay {
+            Some(replay) => {
+                let mut extra = Vec::new();
+                if replay.match_url.is_some() {
+                    extra.push(row([button("View in Gex").key("room:gex").secondary()]));
+                }
+                card([card_content([self.replay_card(&replay.info, 200.0, extra)]).pt(tokens::SPACE_5)])
+            }
+            None => {
+                let words = if update.picking {
+                    "A replay is on its way to the server…"
+                } else {
+                    "Paste a link to a replay on BAR's site below, pick one of your own under My replays, or watch one again from the history."
+                };
+                card([card_header([card_title("No replay yet"), card_description(words)])])
+            }
+        }
+    }
+
+    /// A field for a BAR replay link or id, to play in the room.
+    fn pick_card(&self, update: &client::Update) -> El {
+        let mut play = button(if update.picking { "Fetching…" } else { "Play" }).key("room:pick-bar").secondary();
+        if update.picking {
+            play = play.disabled();
+        }
+        titled_card(
+            "Play another replay",
+            [
+                row([
+                    text_input_with(
+                        "bar-link",
+                        &self.bar_link,
+                        &self.selection,
+                        TextInputOpts::default().placeholder("A BAR replay link or id"),
+                    )
+                    .fill_width(),
+                    play,
+                ])
+                .gap(tokens::SPACE_2),
+                text("It becomes the room's replay for everyone, and starts when someone presses Start.")
+                    .caption()
+                    .muted()
+                    .wrap_text(),
+            ],
+        )
+    }
+
     /// What is being watched, in one line: the map's picture, the map and
-    /// who plays, where this viewer stands, and the party's buttons. The
+    /// who plays, where this viewer stands, and the room's buttons. The
     /// game's length is left out: the timeline below may be hiding it.
     /// "In game" only once the game says where it is: an engine that is open
-    /// may still be loading, or running ahead to where the party is.
-    fn watching_bar(&self, update: &client::Update, session: &SessionView, over: bool, game: timeline::GameState) -> El {
-        let state = if session.ended {
+    /// may still be loading, or running ahead to where the room is.
+    fn watching_bar(&self, update: &client::Update, room: &RoomView, over: bool, game: timeline::GameState) -> El {
+        let state = if room.ended {
             badge("Replay finished").muted()
         } else if update.stage == Stage::Playing {
             match game {
@@ -876,19 +1204,20 @@ impl Ui {
         } else {
             badge("Not in game").muted()
         };
-        let (start, leave) = party_buttons(update, over);
+        let info = room.replay.as_ref().map(|r| r.info.clone()).unwrap_or_default();
         let mut items = vec![
-            self.picture(&session.replay.map, 40.0),
+            self.picture(&info.map, 40.0),
             column([
-                text(session.replay.map.clone()).label().ellipsis(),
-                text(versus(&session.replay)).caption().muted().ellipsis(),
+                text(format!("{}  ·  {}", room.name, info.map)).label().ellipsis(),
+                text(versus(&info)).caption().muted().ellipsis(),
             ])
             .gap(2.0)
             .width(Size::Fill(1.0)),
             state,
         ];
-        items.extend(start);
-        items.push(leave);
+        items.extend(room_actions(update, over));
+        items.push(button("Copy link").key("room:copy").secondary());
+        items.push(button(if over { "Close" } else { "Leave" }).key("room:leave").ghost());
         row(items).gap(tokens::SPACE_3).align(Align::Center)
     }
 
@@ -953,7 +1282,7 @@ impl Ui {
     }
 
     fn replay_preview(&self) -> El {
-        let Some(replay) = self.selected.and_then(|i| self.replays.get(i)) else {
+        let Some(replay) = self.selected_replay() else {
             return card([card_content([text("Pick a replay to see what it is.").muted()]).pt(tokens::SPACE_5)]);
         };
         let Some(info) = &replay.info else {
@@ -974,22 +1303,115 @@ impl Ui {
                 .muted(),
             text(replay.file_name.clone()).caption().muted().ellipsis(),
         ];
-        match self.create_server() {
-            Some((server, _)) => {
-                let label = if self.creating { "Uploading…" } else { "Watch together" };
-                let mut start = button(label).key("replays:watch").primary();
-                if self.creating {
-                    start = start.disabled();
+        let paired = self.paired_server();
+        match (self.live_room(), &paired) {
+            // In a room: this replay becomes its replay.
+            (Some(room), _) => {
+                let picking = room.update.as_ref().is_some_and(|u| u.picking);
+                let name = room.view().map_or("the room".to_owned(), |v| v.name.clone());
+                let label = if picking { "Uploading…".to_owned() } else { format!("Play in {}", short(&name, 24)) };
+                let mut play = button(label).key("replays:play").primary();
+                if picking {
+                    play = play.disabled();
                 }
-                body.push(start);
-                body.push(text(format!("Uploads the replay to {} and copies an invite link.", host_of(&server))).caption().muted().wrap_text());
+                body.push(play);
+                body.push(
+                    text(format!("Uploads the replay into {name}. It starts when someone there presses Start."))
+                        .caption()
+                        .muted()
+                        .wrap_text(),
+                );
             }
-            None => body.push(alert([
-                alert_title("Not paired with a server"),
-                alert_description("Open your barwatch server's page in a browser and press “Pair the desktop app”. Then you can start watch parties from here."),
+            (None, Some((server, _))) => {
+                body.push(button("Watch together").key("replays:together").primary());
+                body.push(
+                    text(format!("Plays the replay in one of {}'s rooms, or in a new one.", host_of(server)))
+                        .caption()
+                        .muted()
+                        .wrap_text(),
+                );
+            }
+            (None, None) => body.push(alert([
+                alert_title("Not in a room"),
+                alert_description("Join a room to play this replay in it. To make rooms yourself, open your barwatch server's page in a browser and press “Pair the desktop app”."),
             ])),
         }
-        card([card_content([scroll(body).key("preview-scroll").gap(tokens::SPACE_2)]).pt(tokens::SPACE_5)])
+        if paired.is_some() {
+            match self.archives.get(&replay.path) {
+                None => body.push(row([button("Archive").key("replays:archive").secondary()])),
+                Some(Archiving::Sending) => body.push(row([button("Archiving…").key("replays:archive").secondary().disabled()])),
+                Some(Archiving::Done(archived)) => {
+                    let mut line = vec![badge("In the archive").success()];
+                    if archived.match_url.is_some() {
+                        line.push(button("View in Gex").key("replays:gex").secondary());
+                    }
+                    body.push(row(line).gap(tokens::SPACE_2).align(Align::Center));
+                }
+            }
+            body.push(
+                text("Archive sends the replay to the server's replay archive without watching it.")
+                    .caption()
+                    .muted()
+                    .wrap_text(),
+            );
+        }
+        card([card_content([scroll(body).key("preview-scroll").gap(tokens::SPACE_2).fill_height()])
+            .pt(tokens::SPACE_5)
+            .fill_height()])
+    }
+
+    /// Which of the paired server's rooms to play a replay in, or a new one.
+    fn together_dialog(&self, t: &Together) -> El {
+        let rooms: El = match &t.rooms {
+            None => row([spinner(), text("Asking for the server's rooms…")]).gap(tokens::SPACE_3).align(Align::Center),
+            Some(Err(e)) => {
+                alert([alert_title("The server's rooms could not be listed"), alert_description(e.clone())]).destructive()
+            }
+            Some(Ok(rooms)) if rooms.is_empty() => text("The server has no rooms yet.").muted(),
+            Some(Ok(rooms)) => item_group(rooms.iter().take(TOGETHER_ROOMS).enumerate().map(|(i, r)| {
+                let playing = r.replay.as_ref().map_or("no replay yet".to_owned(), |p| p.info.map.clone());
+                let here = match r.members.len() {
+                    0 => "nobody there".to_owned(),
+                    1 => "1 there".to_owned(),
+                    n => format!("{n} there"),
+                };
+                item([
+                    item_content([item_title(r.name.clone()), item_description(format!("{playing}  ·  {here}"))]),
+                    item_actions([button("Play here").key(format!("pick-room:{i}")).secondary()]),
+                ])
+                .align(Align::Center)
+            })),
+        };
+        let mut create = button(if t.creating { "Making…" } else { "New room" }).key("together:create").secondary();
+        if t.creating {
+            create = create.disabled();
+        }
+        dialog(
+            "together",
+            [
+                dialog_header([
+                    dialog_title("Watch together"),
+                    dialog_description(format!(
+                        "Play {} in one of {}'s rooms, or make a new one. It starts when someone in the room presses Start.",
+                        t.map,
+                        host_of(&t.server)
+                    )),
+                ]),
+                rooms,
+                row([
+                    text_input_with(
+                        "room-name",
+                        &t.name,
+                        &self.selection,
+                        TextInputOpts::default().placeholder("New room's name"),
+                    )
+                    .fill_width(),
+                    create,
+                ])
+                .gap(tokens::SPACE_2),
+                dialog_footer([button("Cancel").key("together:cancel").ghost()]),
+            ],
+        )
     }
 
     fn settings_view(&self) -> El {
@@ -1000,9 +1422,11 @@ impl Ui {
             format!("{engines} engine version(s) installed here. barwatch shares this folder with BAR, so neither downloads what the other already has.")
         };
         let servers: Vec<El> = if self.cfg.servers.is_empty() {
-            vec![text("None. Pairing is only needed to start watch parties from this app; joining never needs it.")
-                .muted()
-                .wrap_text()]
+            vec![text(
+                "None. Pairing is only needed to make rooms and to archive replays from this app; joining a room never needs it.",
+            )
+            .muted()
+            .wrap_text()]
         } else {
             self.cfg
                 .servers
@@ -1022,7 +1446,7 @@ impl Ui {
             uri::Status::Registered => ("barwatch:// links open this app.", badge("working").success()),
             uri::Status::Missing => ("barwatch:// links do not open this app yet.", badge("not set up").warning()),
             uri::Status::Unsupported => {
-                ("Link handling is not supported on this system; paste invite links instead.", badge("unsupported").muted())
+                ("Link handling is not supported on this system; paste room links instead.", badge("unsupported").muted())
             }
         };
         scroll([
@@ -1031,7 +1455,7 @@ impl Ui {
                 [field_with(
                     "Name",
                     text_input("name", &self.name, &self.selection),
-                    FieldOpts::default().description("Shown to the others in the party and in game. Changed slightly if a player in the replay has the same name."),
+                    FieldOpts::default().description("Shown to the others in the room and in game. Changed slightly if a player in the replay has the same name."),
                 )],
             ),
             titled_card(
@@ -1044,7 +1468,7 @@ impl Ui {
             row([spacer(), button("Save").key("settings:save").primary()]),
             titled_card("Paired servers", servers),
             titled_card(
-                "Invite links",
+                "Room links",
                 [
                     row([text(link_text).fill_width().wrap_text(), link_badge]).gap(tokens::SPACE_2).align(Align::Center),
                     row([button("Set up link handling").key("settings:register").secondary()]),
@@ -1058,22 +1482,60 @@ impl Ui {
     }
 }
 
-/// The party's buttons: those that start something and the invite link, and
-/// the one that leaves, which stands apart at the far end.
-fn party_buttons(update: &client::Update, over: bool) -> (Vec<El>, El) {
-    let phase = update.session.as_ref().map(|s| s.phase);
-    // After a run the engine may still be open: the next one can start regardless.
-    let installed = matches!(update.stage, Stage::Ready | Stage::Closed | Stage::Playing);
-    let mut buttons: Vec<El> = Vec::new();
-    if !over && installed && matches!(phase, Some(Phase::Idle | Phase::Failed)) {
-        let again = update.session.as_ref().is_some_and(|s| s.run > 0);
-        buttons.push(button(if again { "Start again for everyone" } else { "Start for everyone" }).key("party:start").primary());
+/// The room's name, where it is, and its link.
+fn room_header(view: &RoomView, server: &Url, over: bool) -> El {
+    row([
+        column([h2(view.name.clone()).ellipsis(), text(format!("A room on {}", host_of(server))).caption().muted()])
+            .gap(2.0)
+            .width(Size::Fill(1.0)),
+        button("Copy link").key("room:copy").secondary(),
+        button(if over { "Close" } else { "Leave" }).key("room:leave").ghost(),
+    ])
+    .gap(tokens::SPACE_2)
+    .align(Align::Center)
+}
+
+/// What can be done with the room's replay from here: start or stop it for
+/// everyone, or get back into it.
+fn room_actions(update: &client::Update, over: bool) -> Vec<El> {
+    let Some(room) = update.room.as_ref().filter(|_| !over) else { return Vec::new() };
+    let mut buttons = Vec::new();
+    // Starting early is fine: a viewer still getting ready joins when it is (§9.2).
+    if room.replay.is_some() && matches!(room.phase, Phase::Idle | Phase::Failed) {
+        buttons.push(button("Start for everyone").key("room:start").primary());
     }
-    if !over && update.stage == Stage::Closed && phase == Some(Phase::Running) {
-        buttons.push(button("Rejoin").key("party:rejoin").primary());
+    if update.stage == Stage::Closed && room.phase == Phase::Running {
+        buttons.push(button("Rejoin").key("room:rejoin").primary());
     }
-    buttons.push(button("Copy invite link").key("party:copy").secondary());
-    (buttons, button(if over { "Close" } else { "Leave" }).key("party:leave").ghost())
+    if matches!(room.phase, Phase::Starting | Phase::Running) {
+        buttons.push(button("Stop for everyone").key("room:stop").secondary());
+    }
+    buttons
+}
+
+/// What the room played before: each can be watched again (if the server can
+/// still have its file) or looked at on the stats service.
+fn history_card(history: &[HistoryEntry], over: bool) -> El {
+    let rows: Vec<El> = history
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let mut actions = Vec::new();
+            if h.match_url.is_some() {
+                actions.push(button("View in Gex").key(format!("history-gex:{i}")).ghost());
+            }
+            if !h.available {
+                actions.push(badge("file gone").muted());
+            } else if !over {
+                actions.push(button("Watch").key(format!("history-watch:{i}")).secondary());
+            }
+            let description =
+                format!("Picked {}  ·  {} long  ·  {}", when(h.picked_unix), clock(h.info.duration_s), versus(&h.info));
+            item([item_content([item_title(h.info.map.clone()), item_description(description)]), item_actions(actions)])
+                .align(Align::Center)
+        })
+        .collect();
+    titled_card("Played here before", [item_group(rows)])
 }
 
 /// Game seconds an engine may go between two reports beyond what its speed
@@ -1081,7 +1543,7 @@ fn party_buttons(update: &client::Update, over: bool) -> (Vec<El>, El) {
 const CATCH_UP_SLACK_S: f64 = 2.0;
 
 /// Whether an engine that reported `last` and then `now` is running ahead
-/// of its own speed: catching up to the party after joining late or a jump.
+/// of its own speed: catching up to the room after joining late or a jump.
 /// Its speed factor says 1 meanwhile, and it reports once a second by the
 /// wall clock with tens of game seconds between reports (DESIGN.md §5.3).
 fn catching_up(last: &Position, now: &Position) -> bool {
@@ -1094,20 +1556,20 @@ fn catching_up(last: &Position, now: &Position) -> bool {
 /// The game's length as the replay's header gives it; a header that gives none
 /// counts as the longest game there is, so that a game position is never cut
 /// short by it (the statistics, once complete, say how long it really was).
-fn replay_length(session: &SessionView) -> u32 {
-    match session.replay.duration_s {
+fn replay_length(info: &ReplayInfo) -> u32 {
+    match info.duration_s {
         0 => barwatch_core::timeline::MAX_FRAME / 30,
         s => s,
     }
 }
 
 /// Where the statistics stand, in one quiet line, for a viewer who is not
-/// in the game yet: the stats service starts on a replay when its party is
-/// made, so this says whether the timeline will have numbers from the start.
-fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
+/// in the game yet: the stats service starts on a replay when a room picks
+/// it, so this says whether the timeline will have numbers from the start.
+fn statistics_line(view: &TimelineView, info: &ReplayInfo) -> El {
     let so_far = |doc: &barwatch_core::timeline::TimelineDoc| {
         let done = doc.frames / 30;
-        format!("worked out up to {} of {}", clock(done), clock(session.replay.duration_s.max(done)))
+        format!("worked out up to {} of {}", clock(done), clock(info.duration_s.max(done)))
     };
     let words = match (timeline::feed(view), &view.doc) {
         // An outage: the server keeps what it has and keeps trying.
@@ -1135,16 +1597,18 @@ fn statistics_line(view: &TimelineView, session: &SessionView) -> El {
     .gap(tokens::SPACE_2)
     .align(Align::Center)
 }
-
 /// Where this viewer stands, in words.
 fn status_block(update: &client::Update, over: bool) -> El {
-    let phase = update.session.as_ref().map(|s| s.phase);
-    let note = update.session.as_ref().and_then(|s| s.note.clone());
+    let room = update.room.as_ref();
+    let phase = room.map(|r| r.phase);
+    let note = room.and_then(|r| r.note.clone());
     let busy = |label: String| row([spinner(), text(label)]).gap(tokens::SPACE_3).align(Align::Center);
     match &update.stage {
+        Stage::Gone => alert([alert_title("This room is gone"), alert_description(client::ROOM_GONE)]).destructive(),
         Stage::Failed(error) => alert([alert_title("This did not work"), alert_description(error.clone())]).destructive(),
-        _ if over => alert([alert_title("You left this watch party")]),
+        _ if over => alert([alert_title("You left this room")]),
         Stage::Connecting => busy("Connecting…".into()),
+        Stage::NoReplay => column(Vec::<El>::new()),
         Stage::Preparing { what, fraction } => {
             let mut parts = vec![busy(format!("{what}…"))];
             if let Some(f) = fraction {
@@ -1156,7 +1620,7 @@ fn status_block(update: &client::Update, over: bool) -> El {
         Stage::Closed => alert([
             alert_title("You closed the game"),
             alert_description(if phase == Some(Phase::Running) {
-                "The party is still going. Rejoin to get back in."
+                "The room is still playing. Rejoin to get back in."
             } else {
                 "The replay is not running right now."
             }),
@@ -1181,13 +1645,17 @@ fn status_block(update: &client::Update, over: bool) -> El {
     }
 }
 
-fn viewers_card(session: &SessionView, me: &str) -> El {
-    let rows: Vec<El> = session
-        .viewers
+/// Who is in the room, and how far each is with its replay.
+fn members_card(room: &RoomView, me: &str) -> El {
+    let has_replay = room.replay.is_some();
+    let rows: Vec<El> = room
+        .members
         .iter()
         .map(|v| {
             let state = if v.in_game {
                 badge("in game").success()
+            } else if !has_replay {
+                badge("here").muted()
             } else {
                 match v.state {
                     ViewerState::Preparing => badge("getting ready").warning(),
@@ -1198,13 +1666,24 @@ fn viewers_card(session: &SessionView, me: &str) -> El {
             };
             let title = if v.name == me { format!("{} (you)", v.name) } else { v.name.clone() };
             let mut content = vec![item_title(title)];
+            let mut words: Vec<String> = Vec::new();
+            if has_replay && !v.engine_name.is_empty() && v.engine_name != v.name {
+                words.push(format!("in game as {}", v.engine_name));
+            }
             if !v.detail.is_empty() {
-                content.push(item_description(v.detail.clone()));
+                words.push(v.detail.clone());
+            }
+            if !words.is_empty() {
+                content.push(item_description(words.join("  ·  ")));
             }
             item([item_content(content), item_actions([state])]).align(Align::Center)
         })
         .collect();
-    titled_card(format!("Viewers ({})", session.viewers.len()), [item_group(rows)])
+    let title = format!("In the room ({})", room.members.len());
+    if rows.is_empty() {
+        return titled_card(title, [text("Nobody is here right now.").muted()]);
+    }
+    titled_card(title, [item_group(rows)])
 }
 
 #[cfg(test)]
@@ -1234,7 +1713,7 @@ mod tests {
         }
     }
 
-    /// The party's timeline as the client's updates drive it (DESIGN.md §5.4, §5.7).
+    /// The room's timeline as the client's updates drive it (DESIGN.md §5.4, §5.7).
     mod watch {
         use super::*;
         use crate::fixtures::{at, docs, view, watching};
@@ -1244,8 +1723,8 @@ mod tests {
             view(TimelineState::Complete, None, Some(docs::duel()))
         }
 
-        fn party(update: client::Update) -> Party {
-            let mut party = Party::new(Url::parse("https://watch.example.org/").unwrap(), "abcdefghijklmnopqrstuv".into());
+        fn party(update: client::Update) -> Room {
+            let mut party = Room::new(Url::parse("https://watch.example.org/").unwrap(), "abcdefghijklmnopqrstuv".into());
             party.update = Some(update);
             party.sync_watch();
             party.tick_watch();
@@ -1253,7 +1732,7 @@ mod tests {
         }
 
         /// The next update from the client, as the window takes it in.
-        fn next(party: &mut Party, update: impl FnOnce(&mut client::Update)) {
+        fn next(party: &mut Room, update: impl FnOnce(&mut client::Update)) {
             let mut u = party.update.clone().unwrap();
             u.jump_refused = false;
             update(&mut u);
@@ -1263,10 +1742,10 @@ mod tests {
         }
 
         fn jump(target_s: u32, at_unix: u64) -> impl FnOnce(&mut client::Update) {
-            move |u| u.session.as_mut().unwrap().jump = Some(JumpView { target_s, at_unix })
+            move |u| u.room.as_mut().unwrap().jump = Some(JumpView { target_s, at_unix })
         }
 
-        fn jumping(party: &Party) -> Option<f32> {
+        fn jumping(party: &Room) -> Option<f32> {
             party.watching().and_then(|w| w.timeline.jumping_to())
         }
 
@@ -1274,12 +1753,12 @@ mod tests {
         fn shown_once_in_game_with_its_statistics() {
             let mut out = watching(false, None, stats());
             out.stage = Stage::Ready;
-            out.session.as_mut().unwrap().phase = Phase::Idle;
+            out.room.as_mut().unwrap().phase = Phase::Idle;
             let mut p = party(out);
             assert!(p.watching().is_none(), "not before the game runs");
             next(&mut p, |u| {
                 u.stage = Stage::Playing;
-                u.session.as_mut().unwrap().phase = Phase::Running;
+                u.room.as_mut().unwrap().phase = Phase::Running;
                 u.position = at(300);
             });
             let w = p.watching().expect("in game");
@@ -1293,13 +1772,13 @@ mod tests {
             Some(Position { report, seen: t0 + Duration::from_millis(after_ms) })
         }
 
-        /// A late joiner's engine: loading, then running ahead to the party,
+        /// A late joiner's engine: loading, then running ahead to the room,
         /// then going at its pace; the timeline says which.
         #[test]
         fn a_late_joiner_is_loading_then_catching_up_then_in_game() {
             use timeline::GameState;
             let mut p = party(watching(false, None, stats()));
-            let state = |p: &Party| p.watching().unwrap().timeline.game_state();
+            let state = |p: &Room| p.watching().unwrap().timeline.game_state();
             assert_eq!(state(&p), GameState::Loading);
             let t0 = Instant::now();
             // The first report says nothing of pace yet: not "in game" so soon.
@@ -1346,7 +1825,7 @@ mod tests {
             let mut update = watching(false, at(5), stats());
             jump(840, 1000)(&mut update);
             let mut p = party(update);
-            assert_eq!(jumping(&p), None, "the engine is catching up to the party, not to that jump");
+            assert_eq!(jumping(&p), None, "the engine is catching up to the room, not to that jump");
             // A later jump is.
             next(&mut p, jump(900, 1100));
             assert_eq!(jumping(&p), Some(900.0));
@@ -1382,7 +1861,7 @@ mod tests {
         fn a_new_run_starts_over_and_an_ended_one_stays_to_look_back_on() {
             let mut p = party(watching(false, at(700), stats()));
             next(&mut p, |u| {
-                let s = u.session.as_mut().unwrap();
+                let s = u.room.as_mut().unwrap();
                 s.ended = true;
                 u.position = at(1271);
             });
@@ -1396,7 +1875,7 @@ mod tests {
             assert!(p.watching().is_some());
             // Started again: gone until this viewer is in the new run's game.
             next(&mut p, |u| {
-                let s = u.session.as_mut().unwrap();
+                let s = u.room.as_mut().unwrap();
                 s.ended = false;
                 s.run = 2;
             });
@@ -1413,6 +1892,45 @@ mod tests {
             });
             let w = p.watching().expect("in the new run");
             assert_eq!(w.timeline.game_s(), 3.0);
+        }
+    }
+
+    /// The room picks another replay: the timeline of the one before goes, and
+    /// statistics of another replay than the room's are never applied.
+    mod another_replay {
+        use super::*;
+        use crate::fixtures::{at, docs, view, watching};
+        use api::TimelineState;
+
+        #[test]
+        fn the_timeline_of_the_replay_before_goes() {
+            let mut room = Room::new(Url::parse("https://watch.example.org/").unwrap(), "abcdefghijklmnopqrstuv".into());
+            room.update = Some(watching(false, at(300), view(TimelineState::Complete, None, Some(docs::duel()))));
+            room.sync_watch();
+            assert!(room.watching().is_some_and(|w| w.applied.is_some()));
+            // Picked another: the run is stopped, the client starts over.
+            let mut u = room.update.clone().unwrap();
+            let r = u.room.as_mut().unwrap();
+            r.phase = Phase::Idle;
+            r.replay.as_mut().unwrap().key = "0123456789abcdef0123456789abcdef".into();
+            u.stage = Stage::Ready;
+            u.engine_run = None;
+            u.position = None;
+            room.update = Some(u);
+            room.sync_watch();
+            assert!(room.watch.is_none(), "dropped with its replay");
+            assert!(room.timeline().is_none(), "the statistics in hand are of the replay before");
+            // In the new replay's game, before its statistics come.
+            let mut u = room.update.clone().unwrap();
+            let r = u.room.as_mut().unwrap();
+            r.phase = Phase::Running;
+            r.run += 1;
+            u.engine_run = Some(r.run);
+            u.stage = Stage::Playing;
+            room.update = Some(u);
+            room.sync_watch();
+            let w = room.watching().expect("in the new game");
+            assert!(w.applied.is_none(), "nothing of the old replay's document");
         }
     }
 

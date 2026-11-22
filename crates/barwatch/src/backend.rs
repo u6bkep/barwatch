@@ -5,6 +5,7 @@
 use crate::client::{self, Settings};
 use crate::mapimg::{self, Picture};
 use crate::replays::{self, LocalReplay};
+use barwatch_core::api::{Archived, RoomView};
 use barwatch_core::maps::MapIndex;
 use barwatch_host::Wakeup;
 use std::path::PathBuf;
@@ -14,22 +15,32 @@ use tokio::sync::mpsc as async_mpsc;
 use url::Url;
 
 pub enum Cmd {
-    /// Join a party, leaving the current one.
-    Join { server: Url, session: String, settings: Settings },
-    /// For the party joined last.
-    Session(client::Command),
+    /// Join a room, leaving the current one.
+    Join { server: Url, room: String, settings: Settings },
+    /// For the room joined last.
+    Room(client::Command),
     /// List and describe the replays in this folder.
     Scan(PathBuf),
     /// Fetch the picture of the map with this in-game name.
     MapImage(String),
-    /// Upload a replay to a paired server as a new party.
-    Create { server: Url, token: String, path: PathBuf },
+    /// The rooms of a paired server.
+    ListRooms(Paired),
+    /// Make a room on a paired server.
+    CreateRoom { server: Paired, name: String },
+    /// Send a replay to a paired server's archive.
+    Archive { server: Paired, path: PathBuf },
+}
+
+/// A paired server, as the window knows it.
+pub struct Paired {
+    pub server: Url,
+    pub token: String,
 }
 
 pub enum Msg {
-    Session(Box<client::Update>),
-    /// The party joined last is over for this app (left, failed or gone).
-    SessionEnded,
+    Room(Box<client::Update>),
+    /// The room joined last is over for this app (left, failed or gone).
+    RoomEnded,
     /// The next batch of described replays, in list order.
     Replays(Vec<LocalReplay>),
     ScanDone,
@@ -37,11 +48,20 @@ pub enum Msg {
         map: String,
         picture: Option<Picture>,
     },
-    Created {
+    Rooms {
         server: Url,
-        id: String,
+        rooms: Result<Vec<RoomView>, String>,
     },
-    CreateFailed(String),
+    RoomCreated {
+        server: Url,
+        room: Result<Box<RoomView>, String>,
+    },
+    Archived {
+        path: PathBuf,
+        result: Result<Archived, String>,
+    },
+    /// Something the window asked for could not be done.
+    Failed(String),
     /// Another launch of the app handed over the link it was started with (`None`: it
     /// had none).
     Opened(Option<String>),
@@ -118,25 +138,25 @@ async fn work(mut commands: async_mpsc::UnboundedReceiver<Cmd>, outbox: Outbox) 
     let http = match barwatch_core::http_client() {
         Ok(h) => h,
         Err(e) => {
-            outbox.post(Msg::CreateFailed(format!("network setup failed: {e:#}")));
+            outbox.post(Msg::Failed(format!("network setup failed: {e:#}")));
             return;
         }
     };
     let cache = crate::config::cache_dir();
     // The map list is fetched once, by the first picture request.
     let maps: Arc<tokio::sync::OnceCell<MapIndex>> = Arc::new(tokio::sync::OnceCell::new());
-    let mut session: Option<async_mpsc::UnboundedSender<client::Command>> = None;
+    let mut room: Option<async_mpsc::UnboundedSender<client::Command>> = None;
     let generation = Arc::new(AtomicU64::new(0));
 
     while let Some(cmd) = commands.recv().await {
         match cmd {
-            Cmd::Join { server, session: id, settings } => {
-                if let Some(old) = session.take() {
+            Cmd::Join { server, room: id, settings } => {
+                if let Some(old) = room.take() {
                     let _ = old.send(client::Command::Leave);
                 }
                 let (tx, rx) = async_mpsc::unbounded_channel();
-                session = Some(tx);
-                // Only the party joined last may speak to the window: an older one
+                room = Some(tx);
+                // Only the room joined last may speak to the window: an older one
                 // that is still winding down must not overwrite or end it.
                 let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
                 let current = generation.clone();
@@ -145,21 +165,22 @@ async fn work(mut commands: async_mpsc::UnboundedReceiver<Cmd>, outbox: Outbox) 
                     let (notify, live) = (outbox.clone(), current.clone());
                     let on_update = move |update| {
                         if live.load(Ordering::SeqCst) == mine {
-                            notify.post(Msg::Session(Box::new(update)));
+                            notify.post(Msg::Room(Box::new(update)));
                         }
                     };
                     client::run(http, server, id, settings, rx, on_update).await;
                     if current.load(Ordering::SeqCst) == mine {
-                        outbox.post(Msg::SessionEnded);
+                        outbox.post(Msg::RoomEnded);
                     }
                 });
             }
-            Cmd::Session(command) => {
-                if let Some(tx) = &session {
+            Cmd::Room(command) => {
+                let leaving = command == client::Command::Leave;
+                if let Some(tx) = &room {
                     let _ = tx.send(command);
                 }
-                if command == client::Command::Leave {
-                    session = None;
+                if leaving {
+                    room = None;
                 }
             }
             Cmd::Scan(dir) => {
@@ -180,13 +201,28 @@ async fn work(mut commands: async_mpsc::UnboundedReceiver<Cmd>, outbox: Outbox) 
                     outbox.post(Msg::MapImage { map, picture });
                 });
             }
-            Cmd::Create { server, token, path } => {
-                let (http, outbox) = (http.clone(), outbox.clone());
+            Cmd::ListRooms(paired) => {
+                let (paired, outbox) =
+                    (client::Paired { http: http.clone(), server: paired.server, token: paired.token }, outbox.clone());
                 tokio::spawn(async move {
-                    match client::create_session(&http, &server, &token, &path).await {
-                        Ok(id) => outbox.post(Msg::Created { server, id }),
-                        Err(e) => outbox.post(Msg::CreateFailed(format!("{e:#}"))),
-                    }
+                    let rooms = paired.rooms().await.map_err(|e| format!("{e:#}"));
+                    outbox.post(Msg::Rooms { server: paired.server, rooms });
+                });
+            }
+            Cmd::CreateRoom { server, name } => {
+                let (paired, outbox) =
+                    (client::Paired { http: http.clone(), server: server.server, token: server.token }, outbox.clone());
+                tokio::spawn(async move {
+                    let room = paired.create_room(&name).await.map(Box::new).map_err(|e| format!("{e:#}"));
+                    outbox.post(Msg::RoomCreated { server: paired.server, room });
+                });
+            }
+            Cmd::Archive { server, path } => {
+                let (paired, outbox) =
+                    (client::Paired { http: http.clone(), server: server.server, token: server.token }, outbox.clone());
+                tokio::spawn(async move {
+                    let result = paired.archive(&path).await.map_err(|e| format!("{e:#}"));
+                    outbox.post(Msg::Archived { path, result });
                 });
             }
         }

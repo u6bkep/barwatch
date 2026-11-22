@@ -1,5 +1,6 @@
-//! Taking part in one watch party: register with the server, install what the
-//! replay needs, start the engine when the party runs, and keep the server told.
+//! Being in one room: register with the server, install what the room's current
+//! replay needs (again whenever the room picks another), start the engine when the
+//! room runs, and keep the server told (DESIGN.md §9.7).
 //!
 //! No UI here. A front end (the window, or the `join` command) feeds [`Command`]s in
 //! and receives an [`Update`] after every change.
@@ -9,8 +10,8 @@ use crate::datadir::DataDir;
 use crate::position::{self, Position};
 use anyhow::{bail, ensure, Context, Result};
 use barwatch_core::api::{
-    self, ApiError, Control, Created, JoinRequest, JoinResponse, Phase, ServerInfo, SessionView, TimelineState, TimelineView,
-    ViewerState, ViewerUpdate, API_VERSION,
+    self, ApiError, Archived, Control, JoinRequest, JoinResponse, NewRoom, Phase, PickReplay, ReplayInfo, RoomView, ServerInfo,
+    TimelineState, TimelineView, ViewerState, ViewerUpdate, API_VERSION,
 };
 use barwatch_core::engine::{self, Binary, Os};
 use barwatch_core::{names, script};
@@ -20,6 +21,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use url::Url;
 
 pub struct Settings {
@@ -30,30 +32,39 @@ pub struct Settings {
     pub headless: bool,
 }
 
-/// Where this viewer is on the way into the party.
+/// Where this viewer stands with the room's current replay.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stage {
     Connecting,
+    /// The room has no replay yet: nothing to install.
+    NoReplay,
     /// Installing the engine, game version or map.
     Preparing {
         what: String,
         fraction: Option<f32>,
     },
-    /// Everything is installed; the engine starts as soon as the party runs.
+    /// Everything is installed; the engine starts as soon as the room runs.
     Ready,
     /// The engine is running.
     Playing,
-    /// The engine was closed while the party goes on; [`Command::Rejoin`] restarts it.
+    /// The engine was closed while the room goes on; [`Command::Rejoin`] restarts it.
     Closed,
     Failed(String),
+    /// The room was deleted or given a new link; [`run`] has ended.
+    Gone,
 }
 
 #[derive(Debug, Clone)]
 pub struct Update {
-    pub session: Option<SessionView>,
+    pub room: Option<RoomView>,
     pub stage: Stage,
-    /// The name the engine uses for this viewer.
-    pub name: String,
+    /// The key of the replay `stage` is about (`RoomReplay::key`): the room's
+    /// current one as this client last saw it.
+    pub replay: Option<String>,
+    /// This viewer's name among the room's members.
+    pub member: String,
+    /// The name this viewer's engine uses in the game.
+    pub engine_name: String,
     /// A one-off message for the user (a refused request, for example).
     pub notice: Option<String>,
     /// Where our engine is in the replay, as its reporter widget last said;
@@ -61,35 +72,60 @@ pub struct Update {
     /// no report yet, or none for [`position::STALE_AFTER`] (user widgets switched off
     /// in BAR, engine stuck).
     pub position: Option<Position>,
-    /// The party's statistics as the server last gave them; `None` until it has
-    /// answered. A server without the timeline call reads as "unavailable".
+    /// The current replay's statistics as the server last gave them; `None` until it
+    /// has answered for this replay.
     pub timeline: Option<Arc<TimelineView>>,
     /// One-off: the server did not take the jump just asked for ([`Command::Jump`]);
     /// `notice` says why.
     pub jump_refused: bool,
-    /// The run of the party our engine, while it runs, was started for. After a
-    /// replay ends the engine stays open; it is in the party's game only while
-    /// this is the party's `run`.
+    /// The run of the room our engine, while it runs, was started for. After a
+    /// replay ends the engine stays open; it is in the room's game only while
+    /// this is the room's `run`.
     pub engine_run: Option<u32>,
+    /// A replay picked from here is on its way to the server.
+    pub picking: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What to make the room's replay ([`Command::Pick`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    /// A replay file of this computer, uploaded into the room.
+    File(PathBuf),
+    /// A link to a replay on BAR's site, or its id.
+    Bar(String),
+    /// A key from the room's history.
+    History(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Ask the server to start the replay for everyone.
+    /// Ask the server to start the room's replay for everyone.
     Start,
+    /// Ask the server to stop the run.
+    Stop,
     /// Start the engine again after it was closed.
     Rejoin,
-    /// Leave the party; ends [`run`].
+    /// Leave the room; ends [`run`].
     Leave,
     /// Ask the server to move every viewer forward to this game time, in seconds.
     Jump(u32),
+    /// Make this the room's replay. It does not start.
+    Pick(Pick),
 }
 
 enum Internal {
-    Session(Box<SessionView>),
+    Room(Box<RoomView>),
     Gone,
-    Progress(String, Option<f32>),
-    Provisioned(Result<PathBuf, String>),
+    /// From the download for replay `key`.
+    Progress {
+        key: String,
+        what: String,
+        fraction: Option<f32>,
+    },
+    Provisioned {
+        key: String,
+        result: Result<PathBuf, String>,
+    },
     /// From the follower of the engine started `launch`-th.
     Position {
         launch: u64,
@@ -98,6 +134,10 @@ enum Internal {
     Timeline(Arc<TimelineView>),
     /// The server did not take the jump asked for, and why.
     JumpRefused(String),
+    /// A request made for a command was refused; why, in words for the user.
+    Refused(String),
+    /// A pick has been answered (taken or refused).
+    Picked,
 }
 
 /// How often the server hears from us; it forgets a viewer after 30 s of silence.
@@ -110,207 +150,554 @@ const QUIT_BY_SIGNAL: Duration = Duration::from_millis(2500);
 /// A request to leave younger than this is an engine's that is closing now.
 const QUIT_FILE_FRESH: Duration = Duration::from_secs(10);
 
-struct Client {
-    http: reqwest::Client,
-    server: Url,
-    session_id: String,
-    settings: Settings,
+/// What the server says when a room is not there: deleted, or given a new link.
+pub const ROOM_GONE: &str = "This room no longer exists: it was deleted or has a new link. Ask for the new link.";
+
+/// A 404 from a room's calls: the room is gone (see [`ROOM_GONE`]).
+#[derive(Debug)]
+pub struct RoomGone;
+
+impl std::fmt::Display for RoomGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(ROOM_GONE)
+    }
 }
 
-/// Runs until the user leaves, the party disappears, or `commands` closes.
+impl std::error::Error for RoomGone {}
+
+/// One room's calls, `<server>/app/v1/rooms/<id>/…`.
+#[derive(Clone)]
+pub struct RoomApi {
+    http: reqwest::Client,
+    server: Url,
+    room: String,
+}
+
+impl RoomApi {
+    pub fn new(http: reqwest::Client, server: Url, room: String) -> RoomApi {
+        RoomApi { http, server, room }
+    }
+
+    /// `<server>/app/v1/rooms/<id><tail>`. The id and server were validated when
+    /// the link was parsed.
+    fn url(&self, tail: &str) -> Url {
+        api::app_url(&self.server, &format!("rooms/{}{tail}", self.room)).expect("validated server URL")
+    }
+
+    async fn post(&self, tail: &str) -> Result<RoomView> {
+        read_room(self.http.post(self.url(tail)).timeout(Duration::from_secs(30)).send().await).await
+    }
+
+    pub async fn start(&self) -> Result<RoomView> {
+        self.post("/start").await
+    }
+
+    pub async fn stop(&self) -> Result<RoomView> {
+        self.post("/stop").await
+    }
+
+    async fn control(&self, control: Control) -> Result<RoomView> {
+        read_room(self.http.post(self.url("/control")).json(&control).timeout(Duration::from_secs(10)).send().await).await
+    }
+
+    /// `PUT rooms/<id>/replay`. Never starts it.
+    pub async fn pick(&self, pick: &Pick) -> Result<RoomView> {
+        let request = self.http.put(self.url("/replay"));
+        let request = match pick {
+            Pick::File(path) => {
+                let bytes = tokio::fs::read(path).await.with_context(|| format!("reading {}", path.display()))?;
+                let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let encoded: String = url::form_urlencoded::byte_serialize(file_name.as_bytes()).collect();
+                request
+                    .header("content-type", "application/octet-stream")
+                    .header("x-barwatch-filename", encoded)
+                    .body(bytes)
+                    .timeout(Duration::from_secs(300))
+            }
+            Pick::Bar(link) => request
+                .json(&PickReplay { bar_replay: Some(link.trim().to_owned()), key: None })
+                .timeout(Duration::from_secs(300)),
+            Pick::History(key) => {
+                request.json(&PickReplay { bar_replay: None, key: Some(key.clone()) }).timeout(Duration::from_secs(300))
+            }
+        };
+        read_room(request.send().await).await
+    }
+}
+
+/// Runs until the user leaves, the room disappears, or `commands` closes.
 pub async fn run(
     http: reqwest::Client,
     server: Url,
-    session_id: String,
+    room_id: String,
     settings: Settings,
     mut commands: mpsc::UnboundedReceiver<Command>,
     notify: impl Fn(Update) + Send + Sync + 'static,
 ) {
-    let client = Client { http, server, session_id, settings };
-    let mut update = Update {
-        session: None,
-        stage: Stage::Connecting,
-        name: client.settings.name.clone(),
-        notice: None,
-        position: None,
-        timeline: None,
-        jump_refused: false,
-        engine_run: None,
+    let api = RoomApi::new(http, server, room_id);
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let mut seat = Seat {
+        update: Update {
+            room: None,
+            stage: Stage::Connecting,
+            replay: None,
+            member: settings.name.clone(),
+            engine_name: settings.name.clone(),
+            notice: None,
+            position: None,
+            timeline: None,
+            jump_refused: false,
+            engine_run: None,
+            picking: false,
+        },
+        api,
+        settings,
+        tx,
+        viewer_id: String::new(),
+        engine_dir: None,
+        provisioner: None,
+        statistics: None,
+        child: None,
+        launched_run: None,
+        launched_as: None,
+        reported: None,
+        positions: None,
+        launches: 0,
+        stale_engine: false,
+        picks: 0,
     };
-    notify(update.clone());
+    notify(seat.update.clone());
 
-    let joined = match client.register(None).await {
+    let joined = match seat.register(None).await {
         Ok(j) => j,
         Err(e) => {
-            update.stage = Stage::Failed(format!("{e:#}"));
-            notify(update);
+            seat.update.stage = if e.is::<RoomGone>() { Stage::Gone } else { Stage::Failed(format!("{e:#}")) };
+            notify(seat.update);
             return;
         }
     };
-    let mut viewer_id = joined.viewer_id;
-    update.name = joined.name;
-    update.session = Some(joined.session.clone());
-    notify(update.clone());
-
-    let (tx, mut events) = mpsc::unbounded_channel();
-    let to_self = tx.clone();
-    let follower = tokio::spawn(follow(client.http.clone(), client.session_url(""), joined.session.rev, tx.clone()));
-    let statistics = {
-        let (http, url, tx) = (client.http.clone(), client.session_url("/timeline"), tx.clone());
-        tokio::spawn(follow_timeline(http, url, TimelinePoll::default(), move |view| tx.send(Internal::Timeline(view)).is_ok()))
-    };
-    let provisioner = tokio::spawn(provision(
-        client.http.clone(),
-        client.settings.data.clone(),
-        client.settings.headless,
-        joined.session.replay.clone(),
-        tx,
-    ));
+    seat.viewer_id = joined.viewer_id;
+    seat.update.member = joined.name;
+    let follower = tokio::spawn(follow(seat.api.clone(), joined.room.rev, seat.tx.clone()));
+    seat.on_room(joined.room);
+    notify(seat.update.clone());
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut engine_dir: Option<PathBuf> = None;
-    let mut child: Option<tokio::process::Child> = None;
-    // The run of the party our engine was last started for.
-    let mut launched_run: Option<u32> = None;
-    let mut reported: Option<(ViewerState, String)> = None;
-    // Reads our engine's position out of its log; one per engine started.
-    let mut positions: Option<tokio::task::JoinHandle<()>> = None;
-    let mut launches: u64 = 0;
-    // Our engine is still open in a run that is over while the party runs a new one.
-    let mut stale_engine = false;
-
     loop {
         tokio::select! {
             Some(event) = events.recv() => match event {
-                Internal::Session(view) => {
-                    // The run our engine was started for is over (stopped, or a new
-                    // one began): the engine, if still up, is in a game that is gone.
-                    if launched_run.is_some_and(|run| run != view.run || view.phase != Phase::Running) {
-                        stop_following(&mut positions, &mut update.position);
-                    }
-                    stale_engine = launched_run.is_some_and(|run| run != view.run) && view.phase == Phase::Running;
-                    update.session = Some(*view);
-                }
+                Internal::Room(view) => seat.on_room(*view),
                 Internal::Gone => {
-                    update.stage = Stage::Failed("This watch party no longer exists.".into());
-                    notify(update.clone());
+                    seat.update.stage = Stage::Gone;
+                    notify(seat.update.clone());
                     break;
                 }
-                Internal::Progress(what, fraction) => {
-                    if matches!(update.stage, Stage::Connecting | Stage::Preparing { .. }) {
-                        update.stage = Stage::Preparing { what, fraction };
+                Internal::Progress { key, what, fraction } => {
+                    let current = seat.update.replay.as_deref() == Some(key.as_str());
+                    if current && matches!(seat.update.stage, Stage::Preparing { .. }) {
+                        seat.update.stage = Stage::Preparing { what, fraction };
                     }
                 }
-                Internal::Provisioned(Ok(dir)) => {
-                    engine_dir = Some(dir);
-                    update.stage = Stage::Ready;
+                Internal::Provisioned { key, result } => {
+                    if seat.update.replay.as_deref() == Some(key.as_str()) {
+                        seat.provisioner = None;
+                        match result {
+                            Ok(dir) => {
+                                seat.engine_dir = Some(dir);
+                                seat.update.stage = Stage::Ready;
+                            }
+                            Err(e) => seat.update.stage = Stage::Failed(e),
+                        }
+                    }
                 }
-                Internal::Provisioned(Err(e)) => update.stage = Stage::Failed(e),
                 Internal::Position { launch, position } => {
-                    if launch != launches || positions.is_none() {
+                    if launch != seat.launches || seat.positions.is_none() {
                         continue; // from an engine we no longer follow
                     }
-                    update.position = position;
+                    seat.update.position = position;
                 }
-                Internal::Timeline(view) => update.timeline = Some(view),
+                // A view of another replay than the room's current one is from a
+                // follower that has since been replaced.
+                Internal::Timeline(view) => {
+                    if view.replay == seat.update.replay {
+                        seat.update.timeline = Some(view);
+                    }
+                }
                 Internal::JumpRefused(why) => {
-                    update.notice = Some(format!("The jump did not happen: {why}"));
-                    update.jump_refused = true;
+                    seat.update.notice = Some(format!("The jump did not happen: {why}"));
+                    seat.update.jump_refused = true;
+                }
+                Internal::Refused(why) => seat.update.notice = Some(why),
+                Internal::Picked => {
+                    seat.picks = seat.picks.saturating_sub(1);
+                    seat.update.picking = seat.picks > 0;
                 }
             },
             command = commands.recv() => match command {
-                Some(Command::Start) => {
-                    if let Err(e) = client.start().await {
-                        update.notice = Some(format!("{e:#}"));
-                    }
-                }
-                Some(Command::Rejoin) => launched_run = None,
-                // On its own: a slow server must not hold up the game position.
-                Some(Command::Jump(seconds)) => {
-                    let (http, url, tx) = (client.http.clone(), client.session_url("/control"), to_self.clone());
-                    tokio::spawn(async move {
-                        if let Err(e) = control(&http, url, Control::Skip { seconds, relative: false }).await {
-                            let _ = tx.send(Internal::JumpRefused(format!("{e:#}")));
-                        }
-                    });
-                }
                 Some(Command::Leave) | None => break,
+                Some(command) => seat.command(command),
             },
-            _ = heartbeat.tick() => reported = None,
-            _ = wait(&mut child), if child.is_some() => {
-                child = None;
-                update.stage = Stage::Closed;
-                update.engine_run = None;
-                stop_following(&mut positions, &mut update.position);
+            _ = heartbeat.tick() => seat.reported = None,
+            _ = wait(&mut seat.child), if seat.child.is_some() => {
+                seat.child = None;
+                seat.launched_as = None;
+                seat.update.stage = Stage::Closed;
+                seat.update.engine_run = None;
+                stop_following(&mut seat.positions, &mut seat.update.position);
             }
         }
 
         // A new run started while our engine is still open in the last one (it
         // stays open after a replay ends): close it, and the new one is joined
         // below once it has gone.
-        if std::mem::take(&mut stale_engine) {
-            if let Some(c) = &mut child {
+        if std::mem::take(&mut seat.stale_engine) {
+            if let Some(c) = &mut seat.child {
                 let _ = c.start_kill();
             }
         }
-
-        // Start the engine when everything is installed and the party runs a run we
-        // have not been in yet.
-        if let (Some(dir), Some(session), None) = (&engine_dir, &update.session, &child) {
-            let due = matches!(update.stage, Stage::Ready | Stage::Closed)
-                && session.phase == Phase::Running
-                && launched_run != Some(session.run);
-            if due {
-                launched_run = Some(session.run);
-                match client.launch(dir, session, &update.name) {
-                    Ok(c) => {
-                        child = Some(c);
-                        update.stage = Stage::Playing;
-                        update.engine_run = Some(session.run);
-                        stop_following(&mut positions, &mut update.position);
-                        launches += 1;
-                        let (launch, tx) = (launches, to_self.clone());
-                        let log = client.engine_log();
-                        positions = Some(tokio::spawn(position::follow(log, move |position| {
-                            let _ = tx.send(Internal::Position { launch, position });
-                        })));
-                    }
-                    Err(e) => update.stage = Stage::Failed(format!("{e:#}")),
-                }
-            }
-        }
-
-        let report = report_of(&update.stage);
-        if reported.as_ref() != Some(&report) {
-            match client.report(&viewer_id, &report).await {
-                Ok(true) => reported = Some(report),
-                // The server forgot us (it restarted, or we were silent too long).
-                Ok(false) => {
-                    let playing_as = child.is_some().then(|| update.name.clone());
-                    if let Ok(again) = client.register(playing_as).await {
-                        viewer_id = again.viewer_id;
-                        if child.is_none() {
-                            update.name = again.name;
-                        }
-                    }
-                }
-                Err(_) => {} // unreachable server: the next heartbeat tries again
-            }
-        }
-        notify(update.clone());
-        update.notice = None;
-        update.jump_refused = false;
+        seat.launch_if_due();
+        seat.report().await;
+        notify(seat.update.clone());
+        seat.update.notice = None;
+        seat.update.jump_refused = false;
     }
 
     follower.abort();
-    statistics.abort();
-    provisioner.abort();
-    stop_following(&mut positions, &mut update.position);
-    if let Some(c) = child {
-        close_engine(c, position::quit_file().as_deref()).await;
+    seat.leave().await;
+}
+
+/// What a viewer last told the server: its state, in words, and the replay it is about.
+type Report = (ViewerState, String, Option<String>);
+
+/// The client's side of being in the room.
+struct Seat {
+    update: Update,
+    api: RoomApi,
+    settings: Settings,
+    /// Back into the loop, from the tasks this starts.
+    tx: mpsc::UnboundedSender<Internal>,
+    viewer_id: String,
+    /// The engine installed for the current replay, once everything is there.
+    engine_dir: Option<PathBuf>,
+    /// Installing what the current replay needs.
+    provisioner: Option<JoinHandle<()>>,
+    /// Long-polls the current replay's statistics.
+    statistics: Option<JoinHandle<()>>,
+    child: Option<tokio::process::Child>,
+    /// The run of the room our engine was last started for.
+    launched_run: Option<u32>,
+    /// The name our engine, while it runs, is in the game under.
+    launched_as: Option<String>,
+    reported: Option<Report>,
+    /// Reads our engine's position out of its log; one per engine started.
+    positions: Option<JoinHandle<()>>,
+    launches: u64,
+    /// Our engine is still open in a run that is over while the room runs a new one.
+    stale_engine: bool,
+    /// Picks sent and not answered yet.
+    picks: u32,
+}
+
+impl Seat {
+    /// `playing_as`: the name our engine is in the game under, when there is one.
+    async fn register(&self, playing_as: Option<String>) -> Result<JoinResponse> {
+        let http = &self.api.http;
+        let info: ServerInfo =
+            read(http.get(api::app_url(&self.api.server, "info")?).timeout(Duration::from_secs(20)).send().await)
+                .await
+                .context("reaching the server")?;
+        ensure!(
+            info.api == API_VERSION,
+            "the server (version {}) and this app ({}) do not match; update the older one",
+            info.version,
+            env!("CARGO_PKG_VERSION")
+        );
+        let body = JoinRequest { name: self.settings.name.clone(), app_version: env!("CARGO_PKG_VERSION").into(), playing_as };
+        let resp = http.post(self.api.url("/viewers")).json(&body).timeout(Duration::from_secs(20)).send().await;
+        read_room(resp).await.context("joining the room")
     }
-    let _ = client.http.delete(client.session_url(&format!("/viewers/{viewer_id}"))).timeout(Duration::from_secs(5)).send().await;
+
+    /// Takes in a view of the room: a new run, a stopped one, another replay.
+    fn on_room(&mut self, view: RoomView) {
+        // The run our engine was started for is over (stopped, or a new one
+        // began): the engine, if still up, is in a game that is gone.
+        if self.launched_run.is_some_and(|run| run != view.run || view.phase != Phase::Running) {
+            stop_following(&mut self.positions, &mut self.update.position);
+        }
+        self.stale_engine = self.launched_run.is_some_and(|run| run != view.run) && view.phase == Phase::Running;
+        if self.child.is_none() {
+            if let Some(me) = view.members.iter().find(|m| m.name == self.update.member) {
+                self.update.engine_name = me.engine_name.clone();
+            }
+        }
+        let key = view.replay.as_ref().map(|r| r.key.clone());
+        let info = view.replay.as_ref().map(|r| r.info.clone());
+        self.update.room = Some(view);
+        if key != self.update.replay || self.update.stage == Stage::Connecting {
+            self.follow_replay(key, info);
+        }
+    }
+
+    /// The room's replay is now `key` (or none): whatever was under way for the
+    /// one before is dropped, and everything starts over for this one.
+    fn follow_replay(&mut self, key: Option<String>, info: Option<ReplayInfo>) {
+        if let Some(task) = self.provisioner.take() {
+            task.abort();
+        }
+        self.engine_dir = None;
+        // An engine still open on the old replay: its game is gone (the server
+        // stops a run before it changes the replay).
+        if let Some(child) = self.child.take() {
+            let quit = position::quit_file();
+            tokio::spawn(async move { close_engine(child, quit.as_deref()).await });
+        }
+        stop_following(&mut self.positions, &mut self.update.position);
+        self.launched_run = None;
+        self.launched_as = None;
+        self.stale_engine = false;
+        self.update.engine_run = None;
+        self.update.replay = key.clone();
+        if self.update.timeline.as_ref().is_some_and(|t| t.replay != key) {
+            self.update.timeline = None;
+        }
+        // The statistics of the old replay are no use: asked afresh, the server
+        // answers at once for the new one.
+        if let Some(task) = self.statistics.take() {
+            task.abort();
+        }
+        let tx = self.tx.clone();
+        self.statistics = Some(tokio::spawn(follow_timeline(
+            self.api.http.clone(),
+            self.api.url("/timeline"),
+            TimelinePoll::default(),
+            move |view| tx.send(Internal::Timeline(view)).is_ok(),
+        )));
+        match (key, info) {
+            (Some(key), Some(info)) => {
+                self.update.stage = Stage::Preparing { what: "Getting ready".into(), fraction: None };
+                self.provisioner = Some(tokio::spawn(provision(
+                    self.api.http.clone(),
+                    self.settings.data.clone(),
+                    self.settings.headless,
+                    key,
+                    info,
+                    self.tx.clone(),
+                )));
+            }
+            _ => self.update.stage = Stage::NoReplay,
+        }
+    }
+
+    /// Asks the server for what the user wants, each on its own so that a slow
+    /// server holds up nothing else.
+    fn command(&mut self, command: Command) {
+        let (api, tx) = (self.api.clone(), self.tx.clone());
+        match command {
+            Command::Start => {
+                tokio::spawn(async move {
+                    if let Err(e) = api.start().await {
+                        let _ = tx.send(Internal::Refused(format!("Not started: {e:#}")));
+                    }
+                });
+            }
+            Command::Stop => {
+                tokio::spawn(async move {
+                    if let Err(e) = api.stop().await {
+                        let _ = tx.send(Internal::Refused(format!("Not stopped: {e:#}")));
+                    }
+                });
+            }
+            Command::Rejoin => self.launched_run = None,
+            Command::Jump(seconds) => {
+                tokio::spawn(async move {
+                    if let Err(e) = api.control(Control::Skip { seconds, relative: false }).await {
+                        let _ = tx.send(Internal::JumpRefused(format!("{e:#}")));
+                    }
+                });
+            }
+            Command::Pick(pick) => {
+                self.picks += 1;
+                self.update.picking = true;
+                tokio::spawn(async move {
+                    if let Err(e) = api.pick(&pick).await {
+                        let _ = tx.send(Internal::Refused(format!("That replay was not taken: {e:#}")));
+                    }
+                    let _ = tx.send(Internal::Picked);
+                });
+            }
+            Command::Leave => {}
+        }
+    }
+
+    /// Starts the engine when everything is installed and the room runs a run we
+    /// have not been in yet.
+    fn launch_if_due(&mut self) {
+        let (Some(dir), Some(room), None) = (&self.engine_dir, &self.update.room, &self.child) else { return };
+        let due = matches!(self.update.stage, Stage::Ready | Stage::Closed)
+            && room.phase == Phase::Running
+            && launched_for(room, self.update.replay.as_deref())
+            && self.launched_run != Some(room.run);
+        if !due {
+            return;
+        }
+        let run = room.run;
+        self.launched_run = Some(run);
+        let name = self.update.engine_name.clone();
+        match self.launch(dir, room, &name) {
+            Ok(c) => {
+                self.child = Some(c);
+                self.launched_as = Some(name);
+                self.update.stage = Stage::Playing;
+                self.update.engine_run = Some(run);
+                stop_following(&mut self.positions, &mut self.update.position);
+                self.launches += 1;
+                let (launch, tx) = (self.launches, self.tx.clone());
+                let log = self.engine_log();
+                self.positions = Some(tokio::spawn(position::follow(log, move |position| {
+                    let _ = tx.send(Internal::Position { launch, position });
+                })));
+            }
+            Err(e) => self.update.stage = Stage::Failed(format!("{e:#}")),
+        }
+    }
+
+    /// Tells the server where this viewer stands, if that changed or a heartbeat is due.
+    async fn report(&mut self) {
+        let (state, detail) = report_of(&self.update.stage);
+        let report: Report = (state, detail, self.update.replay.clone());
+        if self.reported.as_ref() == Some(&report) {
+            return;
+        }
+        let body = ViewerUpdate { state: report.0, detail: report.1.clone(), replay: report.2.clone() };
+        let resp = self
+            .api
+            .http
+            .put(self.api.url(&format!("/viewers/{}", self.viewer_id)))
+            .json(&body)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        match resp.map(|r| r.status()) {
+            // The server forgot us (it restarted, or we were silent too long).
+            Ok(StatusCode::GONE) => {
+                if let Ok(again) = self.register(self.launched_as.clone()).await {
+                    self.viewer_id = again.viewer_id;
+                    self.update.member = again.name;
+                    self.on_room(again.room);
+                }
+            }
+            // The room is gone: its follower says so too.
+            Ok(StatusCode::NOT_FOUND) => {}
+            Ok(_) => self.reported = Some(report),
+            Err(_) => {} // unreachable server: the next heartbeat tries again
+        }
+    }
+
+    /// Where the engine's output goes.
+    fn engine_log(&self) -> PathBuf {
+        self.settings.data.root.join("barwatch_engine.log")
+    }
+
+    /// Starts the engine as a spectator of the running room.
+    fn launch(&self, engine_dir: &Path, room: &RoomView, name: &str) -> Result<tokio::process::Child> {
+        let port = room.game_port.context("the server did not say which port to connect to")?;
+        let host = match &room.game_host {
+            Some(h) => h.clone(),
+            None => self.api.server.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string(),
+        };
+        // Both end up inside a start script.
+        ensure!(names::valid_host(&host), "the server named an odd game host: {host:?}");
+        let name = names::sanitize(name);
+
+        let data = &self.settings.data.root;
+        let script_path = data.join("barwatch_script.txt");
+        std::fs::write(&script_path, script::join_script(&host, port, &name))
+            .with_context(|| format!("writing {}", script_path.display()))?;
+        let which = if self.settings.headless { Binary::Headless } else { Binary::Spring };
+        let binary = match stand_in_engine() {
+            Some(program) => program,
+            None => which.find(engine_dir).with_context(|| format!("no engine executable in {}", engine_dir.display()))?,
+        };
+        let log_path = self.engine_log();
+        let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+        // A request to leave left over from an engine before (the app was
+        // killed while closing it) would end this one once it has loaded. A
+        // fresh one belongs to the engine of a room just left or a replay just
+        // changed, closing now: `close_engine` takes it away within seconds, long
+        // before this engine has loaded, and taken away now that engine would be killed.
+        if let Some(quit) = position::quit_file() {
+            let fresh = std::fs::metadata(&quit)
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < QUIT_FILE_FRESH));
+            if !fresh {
+                match std::fs::remove_file(&quit) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("removing {}: {e}", quit.display()),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(program) = stand_in_engine() {
+            return tokio::process::Command::new(&program)
+                .arg(self.api.url("").as_str())
+                .stdin(Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .kill_on_drop(true)
+                .spawn()
+                .with_context(|| format!("starting {}", program.display()));
+        }
+        let mut command = tokio::process::Command::new(&binary);
+        // The position reporter: a folder of our own, never BAR's. Without it the
+        // game runs as before, only its position is unknown.
+        match position::widget_dir().map(|dir| position::install(&dir)) {
+            Some(Ok(Some(datadirs))) => {
+                command.env("SPRING_DATADIR", datadirs);
+            }
+            Some(Ok(None)) => eprintln!("barwatch: the reporter folder's path cannot be given to the engine"),
+            Some(Err(e)) => eprintln!("barwatch: could not write the position reporter: {e}"),
+            None => eprintln!("barwatch: no local data folder for the position reporter"),
+        }
+        // A group of its own: a Ctrl+C in the terminal the app was started
+        // from reaches the app, which closes the engine properly, and not the
+        // engine, which (headless) would die without leaving the game.
+        #[cfg(unix)]
+        command.process_group(0);
+        command
+            .current_dir(engine_dir)
+            .arg("--write-dir")
+            .arg(data)
+            .arg("--isolation")
+            .arg(&script_path)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .spawn()
+            .with_context(|| format!("starting {}", binary.display()))
+    }
+
+    /// Leaves: the engine closed properly, the server told.
+    async fn leave(mut self) {
+        for task in [self.provisioner.take(), self.statistics.take()].into_iter().flatten() {
+            task.abort();
+        }
+        stop_following(&mut self.positions, &mut self.update.position);
+        if let Some(c) = self.child.take() {
+            close_engine(c, position::quit_file().as_deref()).await;
+        }
+        if !self.viewer_id.is_empty() {
+            let url = self.api.url(&format!("/viewers/{}", self.viewer_id));
+            let _ = self.api.http.delete(url).timeout(Duration::from_secs(5)).send().await;
+        }
+    }
+}
+
+/// Whether the room's run is of the replay this client installed for. Always
+/// so in practice (the server stops a run before it changes the replay, and the
+/// client starts over when it sees the change); checked so that an engine is never
+/// started with what another replay needs.
+fn launched_for(room: &RoomView, replay: Option<&str>) -> bool {
+    room.replay.as_ref().map(|r| r.key.as_str()) == replay
 }
 
 async fn wait(child: &mut Option<tokio::process::Child>) {
@@ -359,7 +746,7 @@ async fn close_engine(mut child: tokio::process::Child, quit_file: Option<&Path>
 }
 
 /// Forgets our engine's position and stops reading its log.
-fn stop_following(follower: &mut Option<tokio::task::JoinHandle<()>>, position: &mut Option<Position>) {
+fn stop_following(follower: &mut Option<JoinHandle<()>>, position: &mut Option<Position>) {
     if let Some(task) = follower.take() {
         task.abort();
     }
@@ -369,6 +756,8 @@ fn stop_following(follower: &mut Option<tokio::task::JoinHandle<()>>, position: 
 fn report_of(stage: &Stage) -> (ViewerState, String) {
     match stage {
         Stage::Connecting => (ViewerState::Preparing, String::new()),
+        // Nothing to get ready for.
+        Stage::NoReplay => (ViewerState::Ready, String::new()),
         Stage::Preparing { what, fraction } => {
             let detail = match fraction {
                 Some(f) => format!("{what} {:.0}%", f * 100.0),
@@ -380,139 +769,13 @@ fn report_of(stage: &Stage) -> (ViewerState, String) {
         Stage::Playing => (ViewerState::Playing, String::new()),
         Stage::Closed => (ViewerState::Ready, "closed the game".into()),
         Stage::Failed(e) => (ViewerState::Error, e.clone()),
-    }
-}
-
-impl Client {
-    /// `<server>/app/v1/sessions/<id><tail>`. The id and server were validated when
-    /// the link was parsed.
-    fn session_url(&self, tail: &str) -> Url {
-        api::app_url(&self.server, &format!("sessions/{}{tail}", self.session_id)).expect("validated server URL")
-    }
-
-    /// `playing_as`: the name our engine is in the game under, when there is one.
-    async fn register(&self, playing_as: Option<String>) -> Result<JoinResponse> {
-        let info: ServerInfo =
-            read(self.http.get(api::app_url(&self.server, "info")?).timeout(Duration::from_secs(20)).send().await)
-                .await
-                .context("reaching the server")?;
-        ensure!(
-            info.api == API_VERSION,
-            "the server (version {}) and this app ({}) do not match; update the older one",
-            info.version,
-            env!("CARGO_PKG_VERSION")
-        );
-        let body = JoinRequest { name: self.settings.name.clone(), app_version: env!("CARGO_PKG_VERSION").into(), playing_as };
-        read(self.http.post(self.session_url("/viewers")).json(&body).timeout(Duration::from_secs(20)).send().await)
-            .await
-            .context("joining the watch party")
-    }
-
-    /// `Ok(false)` when the server no longer knows this viewer.
-    async fn report(&self, viewer_id: &str, (state, detail): &(ViewerState, String)) -> Result<bool> {
-        let body = ViewerUpdate { state: *state, detail: detail.clone() };
-        let resp = self
-            .http
-            .put(self.session_url(&format!("/viewers/{viewer_id}")))
-            .json(&body)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
-        Ok(!matches!(resp.status(), StatusCode::GONE | StatusCode::NOT_FOUND))
-    }
-
-    async fn start(&self) -> Result<()> {
-        let _: SessionView =
-            read(self.http.post(self.session_url("/start")).timeout(Duration::from_secs(20)).send().await).await?;
-        Ok(())
-    }
-
-    /// Where the engine's output goes.
-    fn engine_log(&self) -> PathBuf {
-        self.settings.data.root.join("barwatch_engine.log")
-    }
-
-    /// Starts the engine as a spectator of the running party.
-    fn launch(&self, engine_dir: &Path, session: &SessionView, name: &str) -> Result<tokio::process::Child> {
-        let port = session.game_port.context("the server did not say which port to connect to")?;
-        let host = match &session.game_host {
-            Some(h) => h.clone(),
-            None => self.server.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string(),
-        };
-        // Both end up inside a start script.
-        ensure!(names::valid_host(&host), "the server named an odd game host: {host:?}");
-        let name = names::sanitize(name);
-
-        let data = &self.settings.data.root;
-        let script_path = data.join("barwatch_script.txt");
-        std::fs::write(&script_path, script::join_script(&host, port, &name))
-            .with_context(|| format!("writing {}", script_path.display()))?;
-        let which = if self.settings.headless { Binary::Headless } else { Binary::Spring };
-        let binary = match stand_in_engine() {
-            Some(program) => program,
-            None => which.find(engine_dir).with_context(|| format!("no engine executable in {}", engine_dir.display()))?,
-        };
-        let log_path = self.engine_log();
-        let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-        // A request to leave left over from an engine before (the app was
-        // killed while closing it) would end this one once it has loaded. A
-        // fresh one belongs to the engine of a party just left, closing now:
-        // `close_engine` takes it away within seconds, long before this
-        // engine has loaded, and taken away now that engine would be killed.
-        if let Some(quit) = position::quit_file() {
-            let fresh = std::fs::metadata(&quit)
-                .and_then(|m| m.modified())
-                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < QUIT_FILE_FRESH));
-            if !fresh {
-                match std::fs::remove_file(&quit) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("removing {}: {e}", quit.display()),
-                    _ => {}
-                }
-            }
-        }
-        if let Some(program) = stand_in_engine() {
-            return tokio::process::Command::new(&program)
-                .arg(self.session_url("").as_str())
-                .stdin(Stdio::null())
-                .stdout(log.try_clone()?)
-                .stderr(log)
-                .kill_on_drop(true)
-                .spawn()
-                .with_context(|| format!("starting {}", program.display()));
-        }
-        let mut command = tokio::process::Command::new(&binary);
-        // The position reporter: a folder of our own, never BAR's. Without it the
-        // game runs as before, only its position is unknown.
-        match position::widget_dir().map(|dir| position::install(&dir)) {
-            Some(Ok(Some(datadirs))) => {
-                command.env("SPRING_DATADIR", datadirs);
-            }
-            Some(Ok(None)) => eprintln!("barwatch: the reporter folder's path cannot be given to the engine"),
-            Some(Err(e)) => eprintln!("barwatch: could not write the position reporter: {e}"),
-            None => eprintln!("barwatch: no local data folder for the position reporter"),
-        }
-        // A group of its own: a Ctrl+C in the terminal the app was started
-        // from reaches the app, which closes the engine properly, and not the
-        // engine, which (headless) would die without leaving the game.
-        #[cfg(unix)]
-        command.process_group(0);
-        command
-            .current_dir(engine_dir)
-            .arg("--write-dir")
-            .arg(data)
-            .arg("--isolation")
-            .arg(&script_path)
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log)
-            .spawn()
-            .with_context(|| format!("starting {}", binary.display()))
+        Stage::Gone => (ViewerState::Error, ROOM_GONE.into()),
     }
 }
 
 /// DEVELOPMENT, debug builds only: a program to run in place of the game, named by
 /// `BARWATCH_STAND_IN_ENGINE`. Nothing is installed for it, and it is started with
-/// the party's address as its one argument; whatever it writes to standard output is
+/// the room's address as its one argument; whatever it writes to standard output is
 /// read as the engine's would be, so it can report a game position (`position.rs`)
 /// without a game. For driving the window in tests without an engine.
 fn stand_in_engine() -> Option<PathBuf> {
@@ -521,12 +784,6 @@ fn stand_in_engine() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-/// A playback command for the whole party, to `<session>/control`.
-async fn control(http: &reqwest::Client, url: Url, control: Control) -> Result<()> {
-    let _: SessionView = read(http.post(url).json(&control).timeout(Duration::from_secs(10)).send().await).await?;
-    Ok(())
 }
 
 /// Decodes a JSON reply, turning the server's `{"error": …}` into the error text.
@@ -544,11 +801,20 @@ async fn read<T: serde::de::DeserializeOwned>(resp: reqwest::Result<reqwest::Res
     resp.json().await.context("unexpected reply from the server")
 }
 
-/// Long-polls the session and forwards every change.
-async fn follow(http: reqwest::Client, url: Url, mut rev: u64, tx: mpsc::UnboundedSender<Internal>) {
+/// [`read`] for a room's calls, where a 404 means the room is gone ([`RoomGone`]).
+async fn read_room<T: serde::de::DeserializeOwned>(resp: reqwest::Result<reqwest::Response>) -> Result<T> {
+    match resp {
+        Ok(r) if r.status() == StatusCode::NOT_FOUND => Err(RoomGone.into()),
+        other => read(other).await,
+    }
+}
+
+/// Long-polls the room and forwards every change.
+async fn follow(api: RoomApi, mut rev: u64, tx: mpsc::UnboundedSender<Internal>) {
     loop {
-        let resp = http
-            .get(url.clone())
+        let resp = api
+            .http
+            .get(api.url(""))
             .query(&[("rev", rev.to_string()), ("wait", "25".to_string())])
             .timeout(Duration::from_secs(40))
             .send()
@@ -558,10 +824,10 @@ async fn follow(http: reqwest::Client, url: Url, mut rev: u64, tx: mpsc::Unbound
                 let _ = tx.send(Internal::Gone);
                 return;
             }
-            Ok(r) if r.status().is_success() => match r.json::<SessionView>().await {
+            Ok(r) if r.status().is_success() => match r.json::<RoomView>().await {
                 Ok(view) => {
                     rev = view.rev;
-                    if tx.send(Internal::Session(Box::new(view))).is_err() {
+                    if tx.send(Internal::Room(Box::new(view))).is_err() {
                         return;
                     }
                 }
@@ -582,8 +848,8 @@ struct TimelinePoll {
     /// Pause after a failed request, or after an answer that came back at once
     /// with nothing new.
     retry: Duration,
-    /// Pause after a 404 (a server older than the timeline), and after an
-    /// answer this app cannot read (a newer one): neither changes soon.
+    /// Pause after an answer this app cannot read (a newer server): it does not
+    /// change soon.
     absent_retry: Duration,
     /// Least time between two answers while the statistics are being worked
     /// out: the server's count moves with nearly every record, and each
@@ -603,47 +869,42 @@ impl Default for TimelinePoll {
     }
 }
 
-/// What a server that has no timeline call amounts to.
-fn no_timeline() -> TimelineView {
-    unavailable(0, "This server does not offer statistics: it is older than they are.")
-}
-
-fn unavailable(rev: u64, note: &str) -> TimelineView {
-    TimelineView { rev, state: TimelineState::Unavailable, note: Some(note.into()), doc: None }
+fn unavailable(rev: u64, note: &str, replay: Option<String>) -> TimelineView {
+    TimelineView { rev, state: TimelineState::Unavailable, note: Some(note.into()), doc: None, replay }
 }
 
 /// One answer of the timeline call.
 enum Answer {
     View(TimelineView),
-    /// 404: the server has no such call, or the party is gone (which the
-    /// session follower finds out).
+    /// 404: the room is gone, which the room's follower finds out.
     Absent,
-    /// An answer this app cannot read, with the server's count when that much
-    /// of it could be read, and why in words for the viewer.
-    Unreadable(Option<u64>, &'static str),
+    /// An answer this app cannot read, with the server's count and the replay it
+    /// is about when that much of it could be read, and why in words for the viewer.
+    Unreadable(Option<(u64, Option<String>)>, &'static str),
 }
 
-/// Long-polls the party's statistics and hands on every change, until `deliver`
-/// says nobody listens any more. The server's bytes are taken for no more than
-/// what the types make of them, and no more than `max_bytes` of them are read.
+/// Long-polls the room's statistics and hands on every change, until `deliver`
+/// says nobody listens any more. A change is a new count or another replay (each
+/// replay has a count of its own, so the two together say what was seen). The
+/// server's bytes are taken for no more than what the types make of them, and no
+/// more than `max_bytes` of them are read.
 async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, deliver: impl Fn(Arc<TimelineView>) -> bool) {
-    // The `rev` of the view delivered last; the server's own count, which starts
-    // over when the server does.
-    let mut rev: Option<u64> = None;
-    // Something was delivered: from then on a 404 is not an old server.
-    let mut delivered = false;
+    // What was delivered last: the server's count (its own, which starts over
+    // when the server does) and the replay it was about.
+    let mut seen: Option<(u64, Option<String>)> = None;
     // What was said last when there was nothing to show, not to say it twice.
     let mut said: Option<&'static str> = None;
     loop {
         let mut request = http.get(url.clone()).timeout(Duration::from_secs(u64::from(poll.wait_s) + 15));
-        if let Some(rev) = rev {
+        if let Some((rev, _)) = &seen {
             request = request.query(&[("rev", rev.to_string()), ("wait", poll.wait_s.to_string())]);
         }
         let asked = Instant::now();
         match fetch_timeline(request, poll.max_bytes).await {
             Ok(Answer::View(view)) => {
                 said = None;
-                if rev == Some(view.rev) {
+                let now = (view.rev, view.replay.clone());
+                if seen.as_ref() == Some(&now) {
                     // The wait ran out with nothing new. A server that answers
                     // at once instead of waiting must not be asked in a loop.
                     if asked.elapsed() < Duration::from_secs(1) {
@@ -651,9 +912,8 @@ async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, de
                     }
                     continue;
                 }
-                rev = Some(view.rev);
+                seen = Some(now);
                 let building = view.state == TimelineState::Building;
-                delivered = true;
                 if !deliver(Arc::new(view)) {
                     return;
                 }
@@ -661,25 +921,17 @@ async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, de
                     tokio::time::sleep(poll.building_gap.saturating_sub(asked.elapsed())).await;
                 }
             }
-            // Once there were statistics a 404 is the party going, or a passing
-            // fault: keep what was shown and ask again later.
-            Ok(Answer::Absent) if delivered => tokio::time::sleep(poll.retry * 10).await,
-            Ok(Answer::Absent) => {
-                if said != Some("absent") && !deliver(Arc::new(no_timeline())) {
-                    return;
-                }
-                said = Some("absent");
-                rev = None;
-                tokio::time::sleep(poll.absent_retry).await;
-            }
+            // The room is gone (its follower ends the client), or a passing fault:
+            // keep what was shown and ask again later.
+            Ok(Answer::Absent) => tokio::time::sleep(poll.retry * 10).await,
             Ok(Answer::Unreadable(at, why)) => {
-                if said != Some(why) && !deliver(Arc::new(unavailable(at.unwrap_or(0), why))) {
+                let replay = at.as_ref().and_then(|(_, r)| r.clone());
+                if said != Some(why) && !deliver(Arc::new(unavailable(at.as_ref().map_or(0, |a| a.0), why, replay))) {
                     return;
                 }
                 said = Some(why);
-                delivered = true;
                 // Asked again from where it was, it would answer the same at once.
-                rev = at.or(rev);
+                seen = at.or(seen);
                 tokio::time::sleep(poll.absent_retry).await;
             }
             Err(_) => tokio::time::sleep(poll.retry).await,
@@ -712,8 +964,8 @@ async fn fetch_timeline(request: reqwest::RequestBuilder, max_bytes: usize) -> R
 }
 
 /// The answer's bytes as this app takes them. A later server may add a state
-/// or a kind of series this app does not know; then only the count is read,
-/// so that the same answer is not fetched over and over.
+/// or a kind of series this app does not know; then only the count and the
+/// replay are read, so that the same answer is not fetched over and over.
 fn read_timeline(body: &[u8]) -> Answer {
     if let Ok(view) = serde_json::from_slice::<TimelineView>(body) {
         return Answer::View(view);
@@ -721,20 +973,23 @@ fn read_timeline(body: &[u8]) -> Answer {
     #[derive(serde::Deserialize)]
     struct Count {
         rev: u64,
+        #[serde(default)]
+        replay: Option<String>,
     }
-    Answer::Unreadable(serde_json::from_slice::<Count>(body).ok().map(|c| c.rev), UNREADABLE)
+    Answer::Unreadable(serde_json::from_slice::<Count>(body).ok().map(|c| (c.rev, c.replay)), UNREADABLE)
 }
 
-/// Installs the engine, game version and map the replay needs.
+/// Installs the engine, game version and map replay `key` needs.
 async fn provision(
     http: reqwest::Client,
     data: DataDir,
     headless: bool,
-    replay: api::ReplayInfo,
+    key: String,
+    replay: ReplayInfo,
     tx: mpsc::UnboundedSender<Internal>,
 ) {
     let progress = |what: String, fraction: Option<f32>| {
-        let _ = tx.send(Internal::Progress(what, fraction));
+        let _ = tx.send(Internal::Progress { key: key.clone(), what, fraction });
     };
     let result: Result<PathBuf> = async {
         std::fs::create_dir_all(&data.root).with_context(|| format!("creating {}", data.root.display()))?;
@@ -761,7 +1016,7 @@ async fn provision(
         Ok(dir)
     }
     .await;
-    let _ = tx.send(Internal::Provisioned(result.map_err(|e| format!("{e:#}"))));
+    let _ = tx.send(Internal::Provisioned { key: key.clone(), result: result.map_err(|e| format!("{e:#}")) });
 }
 
 /// "Beyond All Reason test-31516-95f3e26" → "test-31516-95f3e26".
@@ -769,23 +1024,45 @@ fn short_game(game: &str) -> &str {
     game.strip_prefix("Beyond All Reason ").unwrap_or(game)
 }
 
-/// Uploads a local replay to a paired server; returns the new party's id.
-pub async fn create_session(http: &reqwest::Client, server: &Url, token: &str, replay: &Path) -> Result<String> {
-    let bytes = tokio::fs::read(replay).await.with_context(|| format!("reading {}", replay.display()))?;
-    let file_name = replay.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let encoded: String = url::form_urlencoded::byte_serialize(file_name.as_bytes()).collect();
-    let resp = http
-        .post(api::app_url(server, "sessions")?)
-        .bearer_auth(token)
-        .header("content-type", "application/octet-stream")
-        .header("x-barwatch-filename", encoded)
-        .body(bytes)
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await;
-    let created: Created = read(resp).await.context("uploading the replay")?;
-    ensure!(names::valid_id(&created.id), "the server answered with a malformed id");
-    Ok(created.id)
+/// The calls of a paired app: they carry its pairing token.
+#[derive(Clone)]
+pub struct Paired {
+    pub http: reqwest::Client,
+    pub server: Url,
+    pub token: String,
+}
+
+impl Paired {
+    /// The server's rooms, most recently used first.
+    pub async fn rooms(&self) -> Result<Vec<RoomView>> {
+        let resp = self.http.get(api::app_url(&self.server, "rooms")?).bearer_auth(&self.token).timeout(Duration::from_secs(20));
+        read(resp.send().await).await.context("listing the server's rooms")
+    }
+
+    pub async fn create_room(&self, name: &str) -> Result<RoomView> {
+        let resp = self
+            .http
+            .post(api::app_url(&self.server, "rooms")?)
+            .bearer_auth(&self.token)
+            .json(&NewRoom { name: name.trim().to_owned() })
+            .timeout(Duration::from_secs(20));
+        let room: RoomView = read(resp.send().await).await.context("making a room")?;
+        ensure!(names::valid_id(&room.id), "the server answered with a malformed room id");
+        Ok(room)
+    }
+
+    /// Sends a replay to the server's archive (bar-replays) without watching it.
+    pub async fn archive(&self, replay: &Path) -> Result<Archived> {
+        let bytes = tokio::fs::read(replay).await.with_context(|| format!("reading {}", replay.display()))?;
+        let resp = self
+            .http
+            .post(api::app_url(&self.server, "archive")?)
+            .bearer_auth(&self.token)
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .timeout(Duration::from_secs(300));
+        read(resp.send().await).await.context("sending the replay to the archive")
+    }
 }
 
 #[cfg(test)]
@@ -854,7 +1131,11 @@ mod tests {
         }
 
         fn view(rev: u64, state: TimelineState) -> Reply {
-            Reply::View(TimelineView { rev, state, note: None, doc: None })
+            of_replay(rev, state, "k1")
+        }
+
+        fn of_replay(rev: u64, state: TimelineState, replay: &str) -> Reply {
+            Reply::View(TimelineView { rev, state, note: None, doc: None, replay: Some(replay.into()) })
         }
 
         /// Asked paths (with their queries) and when, in order.
@@ -864,7 +1145,7 @@ mod tests {
         /// open without answering.
         async fn serve(replies: Vec<Reply>) -> (Url, Asked) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = Url::parse(&format!("http://{}/app/v1/sessions/abc/timeline", listener.local_addr().unwrap())).unwrap();
+            let url = Url::parse(&format!("http://{}/app/v1/rooms/abc/timeline", listener.local_addr().unwrap())).unwrap();
             let asked: Asked = Arc::default();
             let log = asked.clone();
             tokio::spawn(async move {
@@ -965,24 +1246,26 @@ mod tests {
             let revs: Vec<(u64, TimelineState)> = got.iter().map(|v| (v.rev, v.state)).collect();
             assert_eq!(revs, [(1, TimelineState::Queued), (2, TimelineState::Building), (1, TimelineState::Building)]);
             let paths = paths(&asked);
-            assert_eq!(paths[0], "/app/v1/sessions/abc/timeline", "the first answer comes at once");
-            assert_eq!(paths[1], "/app/v1/sessions/abc/timeline?rev=1&wait=1");
-            assert_eq!(paths[3], "/app/v1/sessions/abc/timeline?rev=2&wait=1");
+            assert_eq!(paths[0], "/app/v1/rooms/abc/timeline", "the first answer comes at once");
+            assert_eq!(paths[1], "/app/v1/rooms/abc/timeline?rev=1&wait=1");
+            assert_eq!(paths[3], "/app/v1/rooms/abc/timeline?rev=2&wait=1");
         }
 
+        /// The room picked another replay: its view is new even with the count
+        /// the old one had, and waiting goes on from it.
         #[tokio::test]
-        async fn a_server_without_the_call_is_told_once_and_asked_rarely() {
-            let (url, asked) = serve(vec![Reply::Status(404), Reply::Status(404), view(5, TimelineState::Complete)]).await;
-            let got = follow_for(url, POLL, 2).await;
-            assert_eq!(got.len(), 2);
-            assert_eq!(got[0].state, TimelineState::Unavailable);
-            assert!(got[0].note.as_deref().is_some_and(|n| n.contains("older")));
-            // The second 404 says nothing new; the server, upgraded, then has it.
-            assert_eq!((got[1].rev, got[1].state), (5, TimelineState::Complete));
-            let asked = asked.lock().unwrap();
-            assert!(asked[1].1 - asked[0].1 >= POLL.absent_retry, "not asked again at once");
-            // Asked afresh after the 404s: no stale rev.
-            assert_eq!(asked[2].0, "/app/v1/sessions/abc/timeline");
+        async fn another_replay_is_a_change_whatever_its_count() {
+            let (url, asked) = serve(vec![
+                of_replay(3, TimelineState::Complete, "k1"),
+                of_replay(3, TimelineState::Queued, "k2"),
+                of_replay(3, TimelineState::Queued, "k2"),
+                of_replay(4, TimelineState::Building, "k2"),
+            ])
+            .await;
+            let got = follow_for(url, POLL, 3).await;
+            let seen: Vec<(u64, Option<String>)> = got.iter().map(|v| (v.rev, v.replay.clone())).collect();
+            assert_eq!(seen, [(3, Some("k1".into())), (3, Some("k2".into())), (4, Some("k2".into()))]);
+            assert_eq!(paths(&asked)[2], "/app/v1/rooms/abc/timeline?rev=3&wait=1");
         }
 
         #[tokio::test]
@@ -1015,14 +1298,16 @@ mod tests {
             assert_eq!(seen, [(9, TimelineState::Unavailable), (10, TimelineState::Complete)]);
             assert!(got[0].note.as_deref().is_some_and(|n| n.contains("update barwatch")));
             // Asked again from its count, so a server that waits for a change does.
-            assert_eq!(paths(&asked)[1], "/app/v1/sessions/abc/timeline?rev=9&wait=1");
+            assert_eq!(paths(&asked)[1], "/app/v1/rooms/abc/timeline?rev=9&wait=1");
         }
 
+        /// A 404 is the room going, which its own follower handles: what was
+        /// shown stays, and nothing is said of it here.
         #[tokio::test]
-        async fn a_404_after_statistics_keeps_them() {
+        async fn a_404_keeps_what_was_shown() {
             let (url, _) = serve(vec![view(4, TimelineState::Complete), Reply::Status(404)]).await;
             let got = follow_for(url, POLL, 2).await;
-            assert_eq!(got.iter().map(|v| v.rev).collect::<Vec<_>>(), [4], "no word of an old server");
+            assert_eq!(got.iter().map(|v| v.rev).collect::<Vec<_>>(), [4]);
         }
 
         #[tokio::test]

@@ -3,18 +3,30 @@
 
 use crate::backend::Backend;
 use crate::client::{Stage, Update};
-use crate::config::{Config, PairedServer};
+use crate::config::{Config, PairedServer, RecentRoom};
 use crate::datadir::DataDir;
 use crate::position::{Position, Report};
 use crate::replays::LocalReplay;
 use crate::ui::Ui;
-use barwatch_core::api::{JumpView, Link, Phase, ReplayInfo, SessionView, TimelineState, TimelineView, ViewerState, ViewerView};
+use barwatch_core::api::{
+    Archived, HistoryEntry, JumpView, Link, Phase, ReplayInfo, RoomReplay, RoomView, TimelineState, TimelineView, ViewerState,
+    ViewerView,
+};
 use barwatch_core::timeline::TimelineDoc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const SCENES: [&str; 26] = [
+pub const SCENES: [&str; 35] = [
     "empty",
+    "join-recent",
+    "room-empty",
+    "room",
+    "room-preparing",
+    "room-gone",
+    "replays-in-room",
+    "watch-together",
+    "archived",
+    "consent-pair",
     "preparing",
     "ready",
     "ready-statistics",
@@ -160,12 +172,19 @@ fn replay(map: &str, start_unix: u64, duration_s: u32, teams: &[&[&str]]) -> Rep
     }
 }
 
-fn session(phase: Phase, viewers: Vec<ViewerView>) -> SessionView {
-    SessionView {
+/// The key of every canned room's current replay (a game id).
+pub(crate) const KEY: &str = "ff3bed6af9c40836c48f467c8374047b";
+const MATCH_URL: &str = "https://replays.example.org/match/ff3bed6af9c40836c48f467c8374047b";
+
+fn current(info: ReplayInfo) -> RoomReplay {
+    RoomReplay { key: KEY.into(), info, game_id: Some(KEY.into()), match_url: Some(MATCH_URL.into()), picked_unix: 1_791_427_990 }
+}
+
+fn room_view(phase: Phase, members: Vec<ViewerView>, replay: Option<RoomReplay>) -> RoomView {
+    RoomView {
         id: "abcdefghijklmnopqrstuv".into(),
         rev: 7,
-        created_unix: 1_791_427_890,
-        replay: replay("Comet Catcher Remake 1.8", 1_791_427_890, 834, &[&["Moth", "Quill"], &["Ember", "Tarn"]]),
+        name: "Friday night".into(),
         phase,
         note: None,
         game_host: None,
@@ -174,14 +193,74 @@ fn session(phase: Phase, viewers: Vec<ViewerView>) -> SessionView {
         paused: false,
         speed: 1.0,
         ended: false,
-        viewers,
-        game_id: None,
         jump: None,
+        members,
+        replay,
+        history: Vec::new(),
     }
 }
 
+/// The room most scenes are in: playing a 2v2 on Comet Catcher.
+fn room(phase: Phase, viewers: Vec<ViewerView>) -> RoomView {
+    let info = replay("Comet Catcher Remake 1.8", 1_791_427_890, 834, &[&["Moth", "Quill"], &["Ember", "Tarn"]]);
+    room_view(phase, viewers, Some(current(info)))
+}
+
+/// What a room played before: one the stats service has, one it never got,
+/// and one whose file the server let go of and cannot fetch again.
+fn history() -> Vec<HistoryEntry> {
+    let entry = |key: &str, info: ReplayInfo, picked_unix: u64, available: bool, archived: bool| HistoryEntry {
+        key: key.into(),
+        info,
+        picked_unix,
+        available,
+        game_id: archived.then(|| key.to_owned()),
+        match_url: archived.then(|| format!("https://replays.example.org/match/{key}")),
+    };
+    vec![
+        entry(
+            "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            replay("Supreme Isthmus v2.1", 1_791_341_490, 1520, &[&["Moth"], &["Ember"]]),
+            1_791_420_000,
+            true,
+            true,
+        ),
+        entry(
+            "u0123456789abcdef0123456789abcd",
+            replay("Quicksilver Remake 1.24", 1_791_255_090, 905, &[&["Moth", "Quill"], &["Ember", "Tarn"]]),
+            1_791_330_000,
+            true,
+            false,
+        ),
+        entry(
+            "1f2e3d4c5b6a79881726354433221100",
+            replay("All That Glitters v2.2.3", 1_791_168_690, 2210, &[&["Quill", "Tarn", "Alder"], &["Wren", "Moth", "Ember"]]),
+            1_791_200_000,
+            false,
+            true,
+        ),
+    ]
+}
+
 fn viewer(name: &str, state: ViewerState, detail: &str, in_game: bool) -> ViewerView {
-    ViewerView { name: name.into(), state, detail: detail.into(), in_game }
+    ViewerView { name: name.into(), state, detail: detail.into(), in_game, engine_name: name.into(), replay: Some(KEY.into()) }
+}
+
+/// The client's word on `room`, for a viewer called Sorrel.
+fn update_of(stage: Stage, room: RoomView) -> Update {
+    Update {
+        engine_run: (stage == Stage::Playing).then_some(room.run),
+        replay: room.replay.as_ref().map(|r| r.key.clone()),
+        room: Some(room),
+        stage,
+        member: "Sorrel".into(),
+        engine_name: "Sorrel".into(),
+        notice: None,
+        position: None,
+        timeline: None,
+        jump_refused: false,
+        picking: false,
+    }
 }
 
 /// What the stand-in for the engine reports: the game at `seconds`, paused,
@@ -191,17 +270,19 @@ pub(crate) fn at(seconds: u32) -> Option<Position> {
 }
 
 pub(crate) fn view(state: TimelineState, note: Option<&str>, doc: Option<TimelineDoc>) -> Option<Arc<TimelineView>> {
-    Some(Arc::new(TimelineView { rev: doc.as_ref().map_or(1, |d| d.rev), state, note: note.map(str::to_owned), doc }))
+    Some(Arc::new(TimelineView {
+        rev: doc.as_ref().map_or(1, |d| d.rev),
+        state,
+        note: note.map(str::to_owned),
+        doc,
+        replay: Some(KEY.into()),
+    }))
 }
 
-/// A party whose game is running with this viewer in it, on the duel or on
+/// A room whose game is running with this viewer in it, on the duel or on
 /// the 18-team game.
 pub(crate) fn watching(teams: bool, position: Option<Position>, timeline: Option<Arc<TimelineView>>) -> Update {
-    let mut session = session(
-        Phase::Running,
-        vec![viewer("Sorrel", ViewerState::Playing, "", true), viewer("Wren", ViewerState::Playing, "", true)],
-    );
-    session.replay = if teams {
+    let info = if teams {
         let sides: [&[&str]; 2] = [&["[gecko]thebluegecko", "[gecko]u6bkep"], &["BARbarianAI (16)"]];
         ReplayInfo {
             game: "Beyond All Reason test-31241-7e01f7d".into(),
@@ -213,26 +294,29 @@ pub(crate) fn watching(teams: bool, position: Option<Position>, timeline: Option
             ..replay("Scylla and Charybdis 1.1", 1_791_427_890, 1277, &[&["[MADO]vault"], &["[MADO]f1sher"]])
         }
     };
-    session.game_id = Some("ff3bed6af9c40836c48f467c8374047b".into());
-    let engine_run = Some(session.run);
-    Update {
-        session: Some(session),
-        stage: Stage::Playing,
-        name: "Sorrel".into(),
-        notice: None,
-        position,
-        timeline,
-        jump_refused: false,
-        engine_run,
-    }
+    let viewers = vec![viewer("Sorrel", ViewerState::Playing, "", true), viewer("Wren", ViewerState::Playing, "", true)];
+    let mut room = room_view(Phase::Running, viewers, Some(current(info)));
+    room.history = history();
+    Update { position, timeline, ..update_of(Stage::Playing, room) }
 }
 
 /// The window in the named state, or `None` for an unknown name.
 pub fn scene(name: &str) -> Option<Ui> {
+    let recent =
+        |room: &str, name: &str| RecentRoom { server: "https://watch.example.org/".into(), room: room.into(), name: name.into() };
     let cfg = Config {
         name: "Sorrel".into(),
         data_dir: None,
         servers: vec![PairedServer { url: "https://watch.example.org/".into(), token: "x".repeat(40) }],
+        rooms: if name == "join-recent" {
+            vec![
+                recent("abcdefghijklmnopqrstuv", "Friday night"),
+                recent("bcdefghijklmnopqrstuvw", "Duels with Wren"),
+                recent("cdefghijklmnopqrstuvwx", "Room"),
+            ]
+        } else {
+            Vec::new()
+        },
     };
     // DEVELOPMENT: `BARWATCH_FIXTURE_DATA` names a real BAR data folder to read
     // marker pictures and unit names from (read only), for the scenes whose
@@ -242,24 +326,13 @@ pub fn scene(name: &str) -> Option<Ui> {
     let data = DataDir { root, own: false };
     let server = url::Url::parse("https://watch.example.org/").unwrap();
     let mut ui = Ui::new(Backend::inert(), cfg, data, None);
+    ui.fixture_in_memory();
     ui.fixture_done_scanning();
-    let party = |stage: Stage, phase: Phase, viewers: Vec<ViewerView>| {
-        let session = session(phase, viewers);
-        Update {
-            engine_run: (stage == Stage::Playing).then_some(session.run),
-            session: Some(session),
-            stage,
-            name: "Sorrel".into(),
-            notice: None,
-            position: None,
-            timeline: None,
-            jump_refused: false,
-        }
-    };
+    let party = |stage: Stage, phase: Phase, viewers: Vec<ViewerView>| update_of(stage, room(phase, viewers));
     let duel = docs::duel();
     match name {
         "empty" => {}
-        "preparing" => ui.fixture_party(
+        "preparing" => ui.fixture_room(
             server,
             party(
                 Stage::Preparing { what: "Downloading engine 2026.07.04".into(), fraction: Some(0.43) },
@@ -270,7 +343,7 @@ pub fn scene(name: &str) -> Option<Ui> {
                 ],
             ),
         ),
-        "ready" => ui.fixture_party(
+        "ready" => ui.fixture_room(
             server,
             party(
                 Stage::Ready,
@@ -286,9 +359,9 @@ pub fn scene(name: &str) -> Option<Ui> {
                 vec![viewer("Sorrel", ViewerState::Ready, "", false), viewer("Wren", ViewerState::Ready, "", false)],
             );
             update.timeline = view(TimelineState::Building, None, Some(docs::prefix(&duel, 9_000)));
-            ui.fixture_party(server, update);
+            ui.fixture_room(server, update);
         }
-        "playing" => ui.fixture_party(
+        "playing" => ui.fixture_room(
             server,
             party(
                 Stage::Playing,
@@ -300,7 +373,7 @@ pub fn scene(name: &str) -> Option<Ui> {
                 ],
             ),
         ),
-        "failed" => ui.fixture_party(
+        "failed" => ui.fixture_room(
             server,
             party(
                 Stage::Failed("could not download engine 2026.07.04: the release has no build for this system".into()),
@@ -309,40 +382,38 @@ pub fn scene(name: &str) -> Option<Ui> {
             ),
         ),
         // In game, the server has not answered about statistics yet.
-        "timeline-asking" => ui.fixture_party(server, watching(false, at(45), None)),
-        "timeline-queued" => ui.fixture_party(server, watching(false, at(150), view(TimelineState::Queued, None, None))),
+        "timeline-asking" => ui.fixture_room(server, watching(false, at(45), None)),
+        "timeline-queued" => ui.fixture_room(server, watching(false, at(150), view(TimelineState::Queued, None, None))),
         // The game (9:40) is ahead of the numbers (8:00).
-        "timeline-building" => ui.fixture_party(
+        "timeline-building" => ui.fixture_room(
             server,
             watching(false, at(580), view(TimelineState::Building, None, Some(docs::prefix(&duel, 14_400)))),
         ),
         // A stats service without the companion, part-way: only its own tally.
         "timeline-older" => {
             let doc = docs::older_service(&docs::prefix(&duel, 28_800));
-            ui.fixture_party(server, watching(false, at(420), view(TimelineState::Building, None, Some(doc))));
+            ui.fixture_room(server, watching(false, at(420), view(TimelineState::Building, None, Some(doc))));
         }
-        "timeline-complete" => {
-            ui.fixture_party(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel))))
-        }
+        "timeline-complete" => ui.fixture_room(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel)))),
         // A large chart whose lines run through its grid labels.
         "timeline-grid" => {
-            ui.fixture_party(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel))));
+            ui.fixture_room(server, watching(false, at(750), view(TimelineState::Complete, None, Some(duel))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.fixture_hero("buildPowerUse");
             }
         }
         "timeline-marks" => {
             let doc = docs::with_made_up_tech(&duel);
-            ui.fixture_party(server, watching(false, at(1140), view(TimelineState::Complete, None, Some(doc))));
+            ui.fixture_room(server, watching(false, at(1140), view(TimelineState::Complete, None, Some(doc))));
         }
         "timeline-teams" => {
-            ui.fixture_party(server, watching(true, at(900), view(TimelineState::Complete, None, Some(docs::teams()))));
+            ui.fixture_room(server, watching(true, at(900), view(TimelineState::Complete, None, Some(docs::teams()))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.fixture_by_player();
             }
         }
         // A server older than the timeline: the client makes this of its 404.
-        "timeline-unavailable" => ui.fixture_party(
+        "timeline-unavailable" => ui.fixture_room(
             server,
             watching(
                 false,
@@ -351,7 +422,7 @@ pub fn scene(name: &str) -> Option<Ui> {
             ),
         ),
         // The stats service gave up on the game at 6:00; the game is at 9:00.
-        "timeline-stopped" => ui.fixture_party(
+        "timeline-stopped" => ui.fixture_room(
             server,
             watching(
                 false,
@@ -364,7 +435,7 @@ pub fn scene(name: &str) -> Option<Ui> {
             ),
         ),
         // The stats service cannot be reached since 6:00; the server keeps trying.
-        "timeline-outage" => ui.fixture_party(
+        "timeline-outage" => ui.fixture_room(
             server,
             watching(
                 false,
@@ -379,35 +450,35 @@ pub fn scene(name: &str) -> Option<Ui> {
         // Another viewer jumped everyone from 6:00 to 14:00; this engine is on its way.
         "timeline-jump" => {
             let stats = view(TimelineState::Complete, None, Some(duel));
-            ui.fixture_party(server, watching(false, at(360), stats.clone()));
+            ui.fixture_room(server, watching(false, at(360), stats.clone()));
             let mut update = watching(false, at(372), stats);
-            if let Some(session) = &mut update.session {
-                session.jump = Some(JumpView { target_s: 840, at_unix: 1_791_428_400 });
+            if let Some(room) = &mut update.room {
+                room.jump = Some(JumpView { target_s: 840, at_unix: 1_791_428_400 });
             }
             ui.fixture_update(update);
         }
         // The viewer looks ahead of the game: the jump button rides the cursor.
         "timeline-ahead" => {
-            ui.fixture_party(server, watching(false, at(76), view(TimelineState::Complete, None, Some(duel))));
+            ui.fixture_room(server, watching(false, at(76), view(TimelineState::Complete, None, Some(duel))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.fixture_cursor(240.0);
             }
         }
         // The game has not said where it is for a while (user widgets off in BAR).
         "timeline-silent" => {
-            ui.fixture_party(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
+            ui.fixture_room(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.fixture_silent_for(Duration::from_secs(60));
             }
         }
-        // A late joiner: the party is well into the game, this engine is still
+        // A late joiner: the room is well into the game, this engine is still
         // loading and has not said where it is.
         "timeline-loading" => {
-            ui.fixture_party(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
+            ui.fixture_room(server, watching(false, None, view(TimelineState::Complete, None, Some(duel))));
         }
-        // The same engine once loaded, running ahead to the party (at 2:30 so far).
+        // The same engine once loaded, running ahead to the room (at 2:30 so far).
         "timeline-catching-up" => {
-            ui.fixture_party(server, watching(false, at(150), view(TimelineState::Complete, None, Some(duel))));
+            ui.fixture_room(server, watching(false, at(150), view(TimelineState::Complete, None, Some(duel))));
             if let Some(timeline) = ui.fixture_timeline() {
                 timeline.set_catching_up(true);
             }
@@ -415,41 +486,107 @@ pub fn scene(name: &str) -> Option<Ui> {
         // The replay has played to its end; the engine is still open.
         "timeline-over" => {
             let stats = view(TimelineState::Complete, None, Some(duel));
-            ui.fixture_party(server, watching(false, at(1200), stats.clone()));
+            ui.fixture_room(server, watching(false, at(1200), stats.clone()));
             let mut update = watching(false, at(1271), stats);
-            if let Some(session) = &mut update.session {
-                session.ended = true;
+            if let Some(room) = &mut update.room {
+                room.ended = true;
             }
             ui.fixture_update(update);
         }
-        "replays" => {
-            let maps =
-                ["Comet Catcher Remake 1.8", "Supreme Isthmus v2.1", "All That Glitters v2.2.3", "Quicksilver Remake 1.24"];
-            let list: Vec<LocalReplay> = (0..40)
-                .map(|i| {
-                    let info = replay(
-                        maps[i % maps.len()],
-                        1_791_427_890 - i as u64 * 86_400,
-                        600 + i as u32 * 37,
-                        &[&["Moth", "Quill"], &["Ember", "Tarn"]],
-                    );
-                    LocalReplay {
-                        path: format!("/demos/{}", info.file_name).into(),
-                        file_name: info.file_name.clone(),
-                        info: (i != 5).then_some(info),
-                    }
-                })
-                .collect();
-            ui.fixture_replays(list, Some(1));
+        "replays" => ui.fixture_replays(local_replays(), Some(1)),
+        // Paired, not in a room: the replay has gone to the archive.
+        "archived" => {
+            ui.fixture_replays(local_replays(), Some(1));
+            ui.fixture_archived(Archived { game_id: KEY.into(), match_url: Some(MATCH_URL.into()) });
+        }
+        // In a room, My replays plays the chosen one there.
+        "replays-in-room" => {
+            ui.fixture_room(server, party(Stage::Ready, Phase::Idle, vec![viewer("Sorrel", ViewerState::Ready, "", false)]));
+            ui.fixture_replays(local_replays(), Some(2));
+        }
+        // Not in a room: which of the server's rooms to play it in.
+        "watch-together" => {
+            ui.fixture_replays(local_replays(), Some(1));
+            let mut busy = room(
+                Phase::Running,
+                vec![viewer("Wren", ViewerState::Playing, "", true), viewer("Alder", ViewerState::Playing, "", true)],
+            );
+            busy.name = "Duels with Wren".into();
+            let quiet = room_view(Phase::Empty, Vec::new(), None);
+            ui.fixture_together(vec![busy, RoomView { name: "Room".into(), ..quiet }]);
+        }
+        "join-recent" => {}
+        // A room nobody has picked a replay for yet.
+        "room-empty" => {
+            let viewers = vec![viewer("Sorrel", ViewerState::Ready, "", false), viewer("Wren", ViewerState::Ready, "", false)];
+            ui.fixture_room(server, update_of(Stage::NoReplay, room_view(Phase::Empty, viewers, None)));
+        }
+        // Ready to start, with what the room played before.
+        "room" => {
+            let mut view = room(
+                Phase::Idle,
+                vec![
+                    viewer("Sorrel", ViewerState::Ready, "", false),
+                    viewer("Wren", ViewerState::Ready, "", false),
+                    ViewerView { engine_name: "Moth (2)".into(), ..viewer("Moth", ViewerState::Ready, "", false) },
+                ],
+            );
+            view.history = history();
+            ui.fixture_room(server, update_of(Stage::Ready, view));
+        }
+        // Someone picked another replay: everyone gets ready for it again,
+        // the server too (its engine), and the one before is in the history.
+        "room-preparing" => {
+            let info = replay("Throne v5", 1_791_430_000, 1980, &[&["Moth", "Quill", "Alder"], &["Ember", "Tarn", "Wren"]]);
+            let mut view = room_view(
+                Phase::Preparing,
+                vec![
+                    viewer("Sorrel", ViewerState::Preparing, "Downloading engine 2026.07.04 61%", false),
+                    viewer("Wren", ViewerState::Ready, "", false),
+                    ViewerView { replay: None, ..viewer("Kestrel", ViewerState::Preparing, "", false) },
+                ],
+                Some(RoomReplay { match_url: None, game_id: None, ..current(info) }),
+            );
+            view.history = history();
+            let stage = Stage::Preparing { what: "Downloading engine 2026.07.04".into(), fraction: Some(0.61) };
+            ui.fixture_room(server, update_of(stage, view));
+        }
+        // Deleted, or given a new link, while this app was in it.
+        "room-gone" => {
+            let mut update = party(Stage::Gone, Phase::Idle, vec![viewer("Sorrel", ViewerState::Ready, "", false)]);
+            update.stage = Stage::Gone;
+            ui.fixture_room(server, update);
+            ui.fixture_room_ended();
         }
         "settings" => ui.fixture_tab("settings"),
-        "consent" => ui.fixture_pending(Link::Join { server, session: "abcdefghijklmnopqrstuv".into() }),
+        "consent" => ui.fixture_pending(Link::Join { server, room: "abcdefghijklmnopqrstuv".into() }),
+        "consent-pair" => ui.fixture_pending(Link::Pair { server, token: "T".repeat(32) }),
         _ => return None,
     }
     if art.is_some() {
         ui.fixture_wait_for_art(Duration::from_secs(30));
     }
     Some(ui)
+}
+
+/// Forty replays of four maps; the sixth is not a readable replay.
+fn local_replays() -> Vec<LocalReplay> {
+    let maps = ["Comet Catcher Remake 1.8", "Supreme Isthmus v2.1", "All That Glitters v2.2.3", "Quicksilver Remake 1.24"];
+    (0..40)
+        .map(|i| {
+            let info = replay(
+                maps[i % maps.len()],
+                1_791_427_890 - i as u64 * 86_400,
+                600 + i as u32 * 37,
+                &[&["Moth", "Quill"], &["Ember", "Tarn"]],
+            );
+            LocalReplay {
+                path: format!("/demos/{}", info.file_name).into(),
+                file_name: info.file_name.clone(),
+                info: (i != 5).then_some(info),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
