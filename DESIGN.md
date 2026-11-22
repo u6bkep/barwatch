@@ -812,12 +812,15 @@ above did not dictate:
   id is a field, so *New link* changes nothing else and a running server is untouched.
   Log lines name rooms by that id, never by the link id (the capability).
 - History: newest first, without duplicates, at most 50; each entry is when the room
-  picked it. Picking the current replay again changes nothing. A `key` that is not in the
+  picked it. Picking the current replay again changes nothing (except that a room
+  `failed` because its file was missing prepares again once the file is back). A `key` that is not in the
   history is 400 (not 404, which means the room is gone); one whose file is gone and
   cannot be fetched again is 409.
 - Picking while a run is on stops it and waits up to 15 s for the server to exit (409 if
-  it does not). Start waits for a pick in progress. A BAR link whose record already has
-  its file downloads nothing.
+  it does not). Start waits while a pick switches the room's replay (not while the pick
+  still downloads its file; a run started then is stopped by the switch). A BAR link
+  whose record already has its file downloads nothing. A deleted room releases its
+  replays only once its server has exited, however long that takes.
 - "Least recently used" is `last_used_unix` in the replay's `meta.json`, set when a room
   picks it, leaves it for another and starts it. The cache is trimmed after every pick,
   after a deleted room's server has stopped, at start, and every 5 s (a replay the

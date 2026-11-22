@@ -534,6 +534,13 @@ async fn run(app: Arc<App>, replay: Arc<Replay>) {
                     };
                     slot.change(|i| i.waiting_for_turn = false);
                     if teams.is_none() {
+                        // Held while the file is read, so the cache cannot take it
+                        // meanwhile (trimming skips a locked replay).
+                        let _held = replay.file_lock.clone().lock_owned().await;
+                        if !replay.has_file() {
+                            drop(permit);
+                            continue;
+                        }
                         teams = read_teams(&replay).await;
                     }
                     let Some(teams) = teams.clone() else {

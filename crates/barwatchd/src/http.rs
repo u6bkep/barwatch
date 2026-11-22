@@ -211,8 +211,10 @@ async fn delete_room(State(app): Shared, Path(id): Path<String>) -> ApiResult<St
         // A pick in flight finishes (and sees the room is gone) first; a running
         // server exits before the room's replays can go from under it.
         let _picking = room.pick_lock.lock().await;
-        if !stop_and_wait(&room, STOP_WAIT).await {
-            crate::log(&format!("room {}: its server did not stop in time", room.uid));
+        // Never before the server is gone: forgetting the room releases its replay
+        // files, and the server may still be streaming one.
+        while !stop_and_wait(&room, STOP_WAIT).await {
+            crate::log(&format!("room {}: its server has not stopped yet; still waiting", room.uid));
         }
         app.forget_room(&room);
     });
@@ -332,6 +334,19 @@ async fn switch(app: &Arc<App>, room: &Arc<Room>, replay: Arc<Replay>, held: Own
         return Err(ApiErr::not_found());
     }
     if room.current().is_some_and(|r| Arc::ptr_eq(&r, &replay)) {
+        // Already playing it. If its file had gone missing (the room failed for
+        // that), it is back now: prepare again.
+        let retry = room.mutate(|st| {
+            let missing = st.phase == Phase::Failed && st.runner.is_none() && replay.has_file();
+            if missing {
+                st.phase = Phase::Preparing;
+                st.note = None;
+            }
+            missing
+        });
+        if retry {
+            tokio::spawn(prepare(app.clone(), room.clone(), replay.clone()));
+        }
         return Ok(());
     }
     if !stop_and_wait(room, STOP_WAIT).await {
