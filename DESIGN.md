@@ -1,4 +1,7 @@
-# barwatch: replay timeline (design)
+# barwatch: design
+
+Two designs live here: the replay timeline (§1–§8, built and released in 0.3.0) and rooms
+(§9, designed 2026-11-22, not built).
 
 Status (2026-11-16): T1–T5 are built (each section's "as built" notes), on branch
 `timeline-prototype`; release preparation for 0.3.0 on `release-prep` (`CHANGELOG.md`).
@@ -593,3 +596,195 @@ Each ends with `cargo clippy --workspace --all-targets -- -D warnings` clean and
 - Loading BAR's pictures from the viewer's own installation distributes nothing; it is
   still BAR's art shown in another program. If the BAR team objects, the glyph fallback
   is the answer.
+
+## 9. Rooms (designed 2026-11-22, not built)
+
+### 9.1 Why
+
+A watch party today is one replay: barwatchd stores the file, prepares the engine,
+holds the viewers and the statistics, and the party's id is the invite link. People
+expect the other way round, from BAR's battle rooms, Starcraft 2's parties and
+Syncplay's rooms: join a place once, then that place watches things together. And the
+only way to get rid of a party is *Delete*, whose wording ("and its replay") says the
+replay is lost, while the replay archive is meant to keep it.
+
+### 9.2 Decisions (user, 2026-11-22) and what was rejected
+
+- **Rooms, not parties.** A room is a place with a link; a party in the Starcraft 2 sense
+  is a group of accounts with a leader that moves between places. barwatch has no
+  accounts (a viewer is an anonymous holder of a link with a name it chose), so on one
+  server a party would be a room anyway. REJECTED: user parties, because they need
+  identity, presence and invitations by name, which nothing here has.
+- **Rooms are permanent.** One link per group of friends, kept until someone deletes the
+  room. REJECTED: dissolving when the last member leaves (BAR's battle rooms do, because
+  the host's session is the room; here "empty" means no app has reported for 30 s, so a
+  link posted in a chat would die if the sender closed barwatch before the others
+  opened it). REJECTED: deleting after an idle period, which was only carried over from
+  the 14-day expiry of parties; nothing technical favours it, since a room is a few KB
+  and replay files are cached separately (§9.5).
+- **A room has a display name and a random id.** The id is in the link and is the only
+  check on the paths reachable without a login (`/app/`), so the name cannot be the
+  address as it is in Syncplay or Mumble: a name in the link could be guessed.
+- **Full trust inside a room.** Anyone with the link can pick the room's replay (a BAR
+  link or id, a file from their own replays, or one from the room's history), start,
+  stop, pause, change the speed and jump. A replay picked this way goes to bar-replays
+  for processing as an upload or submission does today, so the room link, not only the
+  login or a pairing token, now lets someone spend simulation time. Accepted: barwatch
+  is used by friends, and whoever has a link was invited by someone signed in. If it
+  grows, the next step is BAR-lobby-like: a room boss and votes.
+- **Creating, deleting and re-linking rooms needs a login or a pairing token**: the web
+  page, or a paired app. *New link* replaces a room's id, for a link that went further
+  than meant.
+- **Start on command.** Picking a replay never starts it. The room shows who has
+  everything for it; pressing Start early is fine, since a viewer still downloading
+  joins when ready and is caught up, as now.
+- **bar-replays is the replay archive; barwatchd only caches.** There is no deleting a
+  replay, only a room. bar-replays stays optional (§9.5 for what that costs).
+- **"View in Gex"** on the current replay and on every history entry opens
+  `<bar-replays>/match/<game id>`. Those pages stay behind authentik: a viewer without an
+  account sees the login page. Accepted, so `../bar-replays/THIRD_PARTY.md`'s decisions
+  2 and 3 (no public match pages) stand.
+- **"Archive"** beside "Watch together" in *My replays* sends a replay to bar-replays
+  without watching it. Needs pairing: outside a room there is no room link to go by.
+- **History, no queue.** A room shows what it is playing and what it played before. A
+  Syncplay-style list of what comes next can follow later.
+- **Membership is presence**: whoever has the room open in the app, as viewers are now.
+  No member list is stored.
+- **API version 2**, app and daemon released together. 0.3.0 apps refuse the new server
+  (they refuse any other `api`), so existing parties are dropped, not converted.
+
+### 9.3 What stays as it is
+
+The engine side does not change: one `spring-dedicated` per running room, streaming one
+replay file, forward seek only, a port from the same pool, `runner.rs` as it is. Chat
+commands, the jump, the game position, the timeline document and its builder, pairing and
+the authentik and `/app/` split in front of the daemon are unchanged.
+
+### 9.4 Daemon state
+
+`state.rs`'s `Session` splits in two.
+
+**Replay** (`/data/replays/<key>/`: `replay.sdfz`, `meta.json`). What is about the game:
+the file, the parsed `Demo`, `ReplayInfo`, the BAR id it was fetched by, engine
+preparation, and the statistics (`timeline::Slot` moves here from the session, so two
+rooms on one game share one follower). Keyed by the game id in the replay's header; a
+replay without one is keyed by a hash of its bytes, has no statistics and is never sent
+to the service (which refuses it). A replay records whether the service has confirmed it
+holds the game (`game_id` set, as `Meta::game_id` is today).
+
+**Room** (`/data/rooms/<id>.json`). What is about people: id, name, `created_unix`,
+`last_used_unix`, the current replay's key (none in a new room), and the history: up to
+50 entries of key and when the room started it, newest first. In memory only, as now:
+phase, run, paused, speed, ended, jump, game port, viewers, who is in the game, the
+runner's channel.
+
+`Phase` gains `Empty` (no replay picked). `Preparing` still means the server is fetching
+the engine for the current replay. Picking a replay while the room runs stops the run
+first (as *Stop* does), then sets the replay; the phase is `Preparing` or `Idle` once
+the engine is there.
+
+Viewers: a viewer's report names the replay key it is about, so a room never shows
+someone as ready for the replay it had before. Names: a member's name is unique among
+the room's members; the name its engine uses is worked out for each replay (unique
+against that replay's players too, as `Session::join` does now) and given in the room's
+view next to the member. `playing_as` keeps working as now.
+
+Housekeeping: viewers expire as now; rooms do not. `BARWATCH_SESSION_DAYS` goes.
+
+### 9.5 Replay cache
+
+With a stats service, a replay file can be fetched again
+(`GET /api/v1/games/{id}/replay`, what `source::through_service` already does), so
+barwatchd keeps files only as a cache, bounded by `BARWATCH_REPLAY_CACHE_MB` (default
+4096), least recently used going first. Never evicted: a replay some room has as its
+current one, and a replay the service has not confirmed. A history entry whose file was
+evicted is fetched again when someone picks it.
+
+Without a service (or for a replay it never confirmed), nothing can be fetched again, so
+a file is kept while it is some room's current replay or among the last 10 entries of
+some room's history, and deleted when it is neither. Older history entries without a
+file show as such and cannot be picked. This one rule (unconfirmed files are kept by
+reference, confirmed ones by the cache budget) covers both setups.
+
+On the first start of a version-2 daemon, `/data/sessions` is deleted (logged).
+
+### 9.6 API (version 2)
+
+Under `/app/v1/` (the prefix stays: it is the proxy's open path, not the API number).
+Room id = capability, as the session id is now.
+
+| call | needs | does |
+|---|---|---|
+| `GET rooms/{id}[?rev&wait]` | link | `RoomView`, long-polling as now |
+| `GET rooms/{id}/timeline[?rev&wait]` | link | the current replay's `TimelineView` |
+| `PUT rooms/{id}/replay` | link | pick a replay: the file (`x-barwatch-filename`), or JSON `{"bar_replay": …}` or `{"key": …}` (history) |
+| `POST rooms/{id}/start`, `…/stop`, `…/control` | link | as the session calls (stop is new here) |
+| `POST rooms/{id}/viewers`, `PUT`/`DELETE …/viewers/{viewer}` | link | as now; reports carry the replay key |
+| `GET rooms`, `POST rooms {name}`, `DELETE rooms/{id}`, `POST rooms/{id}/relink` | pairing token | the paired app's room list, create, delete, new link |
+| `POST archive` | pairing token | the file to bar-replays (`PUT /api/v1/replays`, priority `batch`); answers the game id |
+
+The web page's `/api/` gets the same room calls without a token (authentik in front).
+`/app/join/{id}` shows the room: name, what it plays, who is there.
+
+`RoomView`: id, rev, name, phase, note, game host and port, run, paused, speed, ended,
+jump, members (`ViewerView` plus the engine name and the replay key their state is
+about), the current replay (`ReplayInfo`, key, game id, `match_url`) or none, and the
+history (key, `ReplayInfo`, when, whether the file can be had, `match_url`).
+`match_url` is `<BARWATCH_STATS_PUBLIC_URL>match/<game id>` when that setting is given
+and the service has confirmed the game, else absent. `ServerInfo.api` becomes 2.
+
+A relinked or deleted room answers 404; the app says the room is gone or has a new link.
+
+Links: `barwatch://join?server=…&room=<id>`; the invite page's address stays
+`<server>/app/join/<id>`.
+
+### 9.7 Desktop app
+
+- **Client** (`client.rs`): joins a room and stays in it until the user leaves. Getting
+  the engine, game and map moves into the loop: when the room's replay changes, the
+  download for the old one is abandoned and the new one's starts, and an engine still
+  open on the old replay is closed. Everything about runs (launch on a new run, rejoin,
+  closing a stale engine, the position follower, jumps) is as now.
+- **Room view** replaces the party view: the room's name and *Copy link*; members with
+  their readiness; the current replay's card with *View in Gex*, or "No replay yet";
+  *Start*, *Stop*, *Rejoin*; the timeline as now; the history with *Watch* and
+  *View in Gex*; a field for a BAR link or id.
+- **My replays**: inside a room, *Play in <room>*; outside one, *Watch together* (paired:
+  pick one of the server's rooms or make a new one). *Archive* when paired, then
+  *View in Gex* once the game id is back.
+- **Join tab**: besides pasting a link, the rooms this app has been in (kept in its
+  config), so a friend gets back in without the link.
+
+### 9.8 Web page
+
+The party list becomes the room list: name, what it plays, who is there, *Copy link*,
+*New link*, *Delete* ("Delete this room? Its replays stay in the archive."). *New room*.
+Picking a replay works as on the app (drop a file, paste a link). `/?replay=<id>` (from
+the bar-replays console) asks which room to put it in, or makes a new one. Pairing stays
+as it is.
+
+### 9.9 Infra
+
+`stacks/barwatch/compose.yml` in the infra repo: `BARWATCH_STATS_PUBLIC_URL:
+https://bar-replays.gecko.network/` and the new image. Nothing else changes in front of
+the daemon: `/app/` stays the open path.
+
+### 9.10 Work packages
+
+Each ends clippy-clean with the workspace tests passing.
+
+- **R1. Daemon** (§9.4–§9.6): rooms, replays, the cache, API 2, the web page (§9.8).
+  Done when a room plays one replay, switches to another and back from history (with the
+  file evicted in between, against `examples/fake_stats`), relinks, and the same works
+  with no service configured.
+- **R2. App** (§9.7). Done when two headless viewers stay in one room across a replay
+  change, both engines restart for the new run, and a viewer who joined during the
+  change is ready for the new replay, not the old one.
+- **R3. Release and deploy**: app and daemon together, infra change, `README.md`.
+
+### 9.11 Open items
+
+- A room's link is a permanent capability; *New link* is the only remedy. Fine for
+  friends (§9.2).
+- Two rooms running the same replay each run a server; nothing is shared but the file and
+  the statistics.
