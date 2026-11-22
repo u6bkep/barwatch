@@ -116,14 +116,14 @@ pub enum Command {
 enum Internal {
     Room(Box<RoomView>),
     Gone,
-    /// From the download for replay `key`.
+    /// From the `download`-th download (each replay the room picks gets one).
     Progress {
-        key: String,
+        download: u64,
         what: String,
         fraction: Option<f32>,
     },
     Provisioned {
-        key: String,
+        download: u64,
         result: Result<PathBuf, String>,
     },
     /// From the follower of the engine started `launch`-th.
@@ -256,6 +256,8 @@ pub async fn run(
         viewer_id: String::new(),
         engine_dir: None,
         provisioner: None,
+        downloads: 0,
+        closing: Vec::new(),
         statistics: None,
         child: None,
         launched_run: None,
@@ -293,14 +295,15 @@ pub async fn run(
                     notify(seat.update.clone());
                     break;
                 }
-                Internal::Progress { key, what, fraction } => {
-                    let current = seat.update.replay.as_deref() == Some(key.as_str());
-                    if current && matches!(seat.update.stage, Stage::Preparing { .. }) {
+                // From a download that has since been replaced (the room went from A to
+                // B and back to A, say), whatever it is about, is no word on this one.
+                Internal::Progress { download, what, fraction } => {
+                    if download == seat.downloads && matches!(seat.update.stage, Stage::Preparing { .. }) {
                         seat.update.stage = Stage::Preparing { what, fraction };
                     }
                 }
-                Internal::Provisioned { key, result } => {
-                    if seat.update.replay.as_deref() == Some(key.as_str()) {
+                Internal::Provisioned { download, result } => {
+                    if download == seat.downloads && seat.provisioner.is_some() {
                         seat.provisioner = None;
                         match result {
                             Ok(dir) => {
@@ -382,6 +385,10 @@ struct Seat {
     engine_dir: Option<PathBuf>,
     /// Installing what the current replay needs.
     provisioner: Option<JoinHandle<()>>,
+    /// Counts downloads started, so that only the latest one's word is taken.
+    downloads: u64,
+    /// Engines closing after the room changed its replay; leaving waits for them.
+    closing: Vec<JoinHandle<()>>,
     /// Long-polls the current replay's statistics.
     statistics: Option<JoinHandle<()>>,
     child: Option<tokio::process::Child>,
@@ -426,16 +433,18 @@ impl Seat {
             stop_following(&mut self.positions, &mut self.update.position);
         }
         self.stale_engine = self.launched_run.is_some_and(|run| run != view.run) && view.phase == Phase::Running;
-        if self.child.is_none() {
-            if let Some(me) = view.members.iter().find(|m| m.name == self.update.member) {
-                self.update.engine_name = me.engine_name.clone();
-            }
-        }
         let key = view.replay.as_ref().map(|r| r.key.clone());
         let info = view.replay.as_ref().map(|r| r.info.clone());
+        let me = view.members.iter().find(|m| m.name == self.update.member).map(|m| m.engine_name.clone());
         self.update.room = Some(view);
+        // First: another replay closes an engine still open on the one before.
         if key != self.update.replay || self.update.stage == Stage::Connecting {
             self.follow_replay(key, info);
+        }
+        // The name the server gives this member for the current replay, unless an
+        // engine is in the game under the one it had.
+        if let (None, Some(name)) = (&self.child, me) {
+            self.update.engine_name = name;
         }
     }
 
@@ -450,7 +459,8 @@ impl Seat {
         // stops a run before it changes the replay).
         if let Some(child) = self.child.take() {
             let quit = position::quit_file();
-            tokio::spawn(async move { close_engine(child, quit.as_deref()).await });
+            self.closing.retain(|task| !task.is_finished());
+            self.closing.push(tokio::spawn(async move { close_engine(child, quit.as_deref()).await }));
         }
         stop_following(&mut self.positions, &mut self.update.position);
         self.launched_run = None;
@@ -470,17 +480,19 @@ impl Seat {
         self.statistics = Some(tokio::spawn(follow_timeline(
             self.api.http.clone(),
             self.api.url("/timeline"),
+            key.clone(),
             TimelinePoll::default(),
             move |view| tx.send(Internal::Timeline(view)).is_ok(),
         )));
         match (key, info) {
-            (Some(key), Some(info)) => {
+            (Some(_), Some(info)) => {
                 self.update.stage = Stage::Preparing { what: "Getting ready".into(), fraction: None };
+                self.downloads += 1;
                 self.provisioner = Some(tokio::spawn(provision(
                     self.api.http.clone(),
                     self.settings.data.clone(),
                     self.settings.headless,
-                    key,
+                    self.downloads,
                     info,
                     self.tx.clone(),
                 )));
@@ -685,6 +697,10 @@ impl Seat {
         if let Some(c) = self.child.take() {
             close_engine(c, position::quit_file().as_deref()).await;
         }
+        // Engines of a replay the room left, still closing.
+        for task in self.closing.drain(..) {
+            let _ = task.await;
+        }
         if !self.viewer_id.is_empty() {
             let url = self.api.url(&format!("/viewers/{}", self.viewer_id));
             let _ = self.api.http.delete(url).timeout(Duration::from_secs(5)).send().await;
@@ -884,11 +900,18 @@ enum Answer {
 }
 
 /// Long-polls the room's statistics and hands on every change, until `deliver`
-/// says nobody listens any more. A change is a new count or another replay (each
+/// says nobody listens any more. `about` is the replay the room had when this
+/// began: what is said of an answer that could not be read is about it. A change is a new count or another replay (each
 /// replay has a count of its own, so the two together say what was seen). The
 /// server's bytes are taken for no more than what the types make of them, and no
 /// more than `max_bytes` of them are read.
-async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, deliver: impl Fn(Arc<TimelineView>) -> bool) {
+async fn follow_timeline(
+    http: reqwest::Client,
+    url: Url,
+    about: Option<String>,
+    poll: TimelinePoll,
+    deliver: impl Fn(Arc<TimelineView>) -> bool,
+) {
     // What was delivered last: the server's count (its own, which starts over
     // when the server does) and the replay it was about.
     let mut seen: Option<(u64, Option<String>)> = None;
@@ -925,7 +948,7 @@ async fn follow_timeline(http: reqwest::Client, url: Url, poll: TimelinePoll, de
             // keep what was shown and ask again later.
             Ok(Answer::Absent) => tokio::time::sleep(poll.retry * 10).await,
             Ok(Answer::Unreadable(at, why)) => {
-                let replay = at.as_ref().and_then(|(_, r)| r.clone());
+                let replay = at.as_ref().and_then(|(_, r)| r.clone()).or_else(|| about.clone());
                 if said != Some(why) && !deliver(Arc::new(unavailable(at.as_ref().map_or(0, |a| a.0), why, replay))) {
                     return;
                 }
@@ -979,17 +1002,18 @@ fn read_timeline(body: &[u8]) -> Answer {
     Answer::Unreadable(serde_json::from_slice::<Count>(body).ok().map(|c| (c.rev, c.replay)), UNREADABLE)
 }
 
-/// Installs the engine, game version and map replay `key` needs.
+/// Installs the engine, game version and map `replay` needs; the `download`-th
+/// download of this client.
 async fn provision(
     http: reqwest::Client,
     data: DataDir,
     headless: bool,
-    key: String,
+    download: u64,
     replay: ReplayInfo,
     tx: mpsc::UnboundedSender<Internal>,
 ) {
     let progress = |what: String, fraction: Option<f32>| {
-        let _ = tx.send(Internal::Progress { key: key.clone(), what, fraction });
+        let _ = tx.send(Internal::Progress { download, what, fraction });
     };
     let result: Result<PathBuf> = async {
         std::fs::create_dir_all(&data.root).with_context(|| format!("creating {}", data.root.display()))?;
@@ -1016,7 +1040,7 @@ async fn provision(
         Ok(dir)
     }
     .await;
-    let _ = tx.send(Internal::Provisioned { key: key.clone(), result: result.map_err(|e| format!("{e:#}")) });
+    let _ = tx.send(Internal::Provisioned { download, result: result.map_err(|e| format!("{e:#}")) });
 }
 
 /// "Beyond All Reason test-31516-95f3e26" → "test-31516-95f3e26".
@@ -1217,7 +1241,7 @@ mod tests {
         async fn follow_for(url: Url, poll: TimelinePoll, want: usize) -> Vec<TimelineView> {
             let got: Arc<Mutex<Vec<TimelineView>>> = Arc::default();
             let sink = got.clone();
-            let follow = follow_timeline(reqwest::Client::new(), url, poll, move |v| {
+            let follow = follow_timeline(reqwest::Client::new(), url, Some("k1".into()), poll, move |v| {
                 let mut got = sink.lock().unwrap();
                 got.push((*v).clone());
                 got.len() < want
@@ -1281,6 +1305,7 @@ mod tests {
             let seen: Vec<(u64, TimelineState)> = got.iter().map(|v| (v.rev, v.state)).collect();
             assert_eq!(seen, [(0, TimelineState::Unavailable), (3, TimelineState::Building)]);
             assert!(got[0].note.as_deref().is_some_and(|n| n.contains("too large")));
+            assert_eq!(got[0].replay.as_deref(), Some("k1"), "about the replay followed, so the window shows it");
             let asked = asked.lock().unwrap();
             assert_eq!(asked.len(), 4);
             assert!(asked[1].1 - asked[0].1 >= POLL.absent_retry, "not fetched again soon");
@@ -1334,7 +1359,7 @@ mod tests {
         #[tokio::test]
         async fn stops_when_nobody_listens() {
             let (url, _) = serve(vec![view(1, TimelineState::Queued), view(2, TimelineState::Queued)]).await;
-            let follow = follow_timeline(reqwest::Client::new(), url, POLL, |_| false);
+            let follow = follow_timeline(reqwest::Client::new(), url, None, POLL, |_| false);
             assert!(tokio::time::timeout(Duration::from_secs(2), follow).await.is_ok());
         }
     }

@@ -142,8 +142,12 @@ pub async fn ensure(
     let dest = root.join(&candidate_dir_names(version)[0]);
     tokio::fs::create_dir_all(root).await.with_context(|| format!("creating {}", root.display()))?;
     // Unpack beside the destination and rename, so a half-extracted engine is never
-    // mistaken for an installed one.
-    let stage = StageDir(root.join(format!(".barwatch-{}", std::process::id())));
+    // mistaken for an installed one. A folder per install: an install whose task was
+    // cancelled (the app's room picked another replay) may still be clearing its
+    // folder, or unpacking into it on a blocking thread, while the next one starts.
+    static INSTALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = INSTALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stage = StageDir(root.join(format!(".barwatch-{}-{n}", std::process::id())));
     let _ = tokio::fs::remove_dir_all(&stage.0).await;
     tokio::fs::create_dir_all(&stage.0).await?;
     install(http, &stage.0, &dest, version, os, needs, progress).await?;
