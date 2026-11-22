@@ -597,7 +597,7 @@ Each ends with `cargo clippy --workspace --all-targets -- -D warnings` clean and
   still BAR's art shown in another program. If the BAR team objects, the glyph fallback
   is the answer.
 
-## 9. Rooms (designed 2026-11-22; R1 built, §9.12)
+## 9. Rooms (designed 2026-11-22; R1 built, §9.12; R2 built, §9.13)
 
 ### 9.1 Why
 
@@ -843,3 +843,53 @@ above did not dictate:
   with a note; the cache never removes it.
 - The web page keeps *Copy link*, *New link* and *Delete* both on the list and in the
   open room; picking works on the open room.
+
+### 9.13 As built (R2, 2026-11-22)
+
+`crates/barwatch`: `client.rs` (the room client), `ui.rs` (the room view, My replays, the
+Join tab), `backend.rs`, `config.rs` (remembered rooms), `uri.rs` (`parse_link`),
+`fixtures.rs` (room scenes), `main.rs` (`join`). Choices the sections above did not dictate:
+- The client's `Stage` gains `NoReplay` (the room has none; reported as `ready` with no
+  `replay`, which the server shows as ready; the window shows such members as "here") and
+  `Gone` (any 404 from a room's calls, at joining or later: the client ends with "This room
+  no longer exists: it was deleted or has a new link"). A 404 of the timeline call no
+  longer means "a server older than statistics": every API 2 server has the call.
+- On a replay change the client aborts the download, closes an engine still open on the
+  old replay the proper way (the reporter widget's quit file, then SIGTERM, then a kill;
+  leaving waits for these), restarts the timeline follower (asked without `rev`, the
+  server answers at once for the new replay) and drops statistics of any other replay;
+  the window also filters by `TimelineView.replay` and drops the timeline and marker
+  pictures of the replay before. Downloads are told apart by a counter, so a stale result
+  of an earlier download of the same replay (A, B, A) is not taken. The follower treats a
+  view as new when its `(rev, replay)` differs.
+- The engine name is read from the room view after a replay change has closed the old
+  engine, and kept while an engine is in the game under it.
+- Each engine install stages in its own folder (`.barwatch-<pid>-<n>`, `engine.rs`): a
+  cancelled install may still be clearing or unpacking into its folder when the next starts.
+- Start, Stop and picks are sent on their own tasks; a refusal comes back as a notice.
+  `Update::picking` is true while a pick is on its way (buttons say "Uploading…" /
+  "Fetching…").
+- *Start for everyone* shows whenever the room has a replay and is `idle` or `failed`,
+  whether or not this viewer is ready (§9.2: starting early is fine); no "Start again"
+  wording, since run numbers carry across replays. *Stop for everyone* shows while
+  `starting` or `running`.
+- *Watch together* (outside a room, paired with the server paired last): a dialog with the
+  server's six most recently used rooms and a field for a new room's name. The app joins
+  the room first and queues the pick behind the join, so a refused file is reported inside
+  the room. A new room's link is copied to the clipboard, as the old *Watch together* did.
+- *Play in <room>* (the name cut to 24 characters) switches to the Room tab. *Archive*
+  results are kept in memory for the session only.
+- Remembered rooms: `rooms` in the app's config (server, room id, name), at most 20,
+  latest first, updated when a room's name changes, dropped on its 404 or by *Forget*.
+  Canned scenes never write the config (`Ui::fixture_in_memory`).
+- A 0.3 party link (`session=`) is refused with "watch parties have become rooms, so ask
+  for the room's link" (`uri::parse_link`; core's own error says only that `room` is
+  missing).
+- A gone room shows no *Copy link*. The first tab is called "Room"; the history card
+  "Played here before", with "file gone" in place of *Watch* for an unavailable entry.
+- `barwatch join` prints one line per change: `[member as engine name] <stage> for <replay
+  key> (room "<name>": <phase>, replay <key>, run <n>)`.
+- New scenes: `join-recent`, `room-empty`, `room`, `room-preparing`, `room-gone`,
+  `replays-in-room`, `watch-together`, `archived`, `consent-pair`; the party scenes are room
+  scenes now.
+
