@@ -67,7 +67,7 @@ function mapImage(replay, size, cls) {
   return img;
 }
 
-const PHASE_TEXT = { preparing: "fetching engine", idle: "ready", starting: "starting", running: "running", failed: "failed" };
+const PHASE_TEXT = { empty: "no replay", preparing: "fetching engine", idle: "ready", starting: "starting", running: "running", failed: "failed" };
 const phaseBadge = (phase) => el("span", { class: `badge ${phase}` }, PHASE_TEXT[phase] || phase);
 
 function teamsBlock(replay) {
@@ -85,21 +85,32 @@ function replayFacts(replay) {
     el("dt", {}, "File"), el("dd", {}, replay.file_name));
 }
 
-function viewersBlock(session) {
-  if (!session.viewers.length) return el("p", { class: "muted" }, "Nobody has joined yet.");
-  return el("div", { class: "viewers" }, session.viewers.map((v) => {
+/** What a room plays, in one line. */
+function playsLine(room) {
+  const r = room.replay?.info;
+  if (!r) return "No replay yet";
+  return `${r.map} · ${r.teams.map((t) => t.join(", ")).join("  vs  ")}`;
+}
+
+/** Who is in a room, in one line. */
+const whoLine = (room) => (room.members.length ? room.members.map((m) => m.name).join(", ") : "Nobody is here");
+
+function membersBlock(room) {
+  if (!room.members.length) return el("p", { class: "muted" }, "Nobody is here yet.");
+  return el("div", { class: "viewers" }, room.members.map((v) => {
     const label = v.in_game ? "in game" : v.state;
     const cls = v.in_game ? "playing" : v.state;
-    return el("div", { class: "viewer" }, el("span", { class: `badge ${cls}` }, label), el("b", {}, v.name), el("span", { class: "muted" }, v.detail));
+    return el("div", { class: "viewer" }, el("span", { class: `badge ${cls}` }, label), el("b", {}, v.name),
+      v.engine_name !== v.name && el("span", { class: "muted" }, `as ${v.engine_name}`), el("span", { class: "muted" }, v.detail));
   }));
 }
 
-/** The link that opens the desktop app on this session. */
+/** The link that opens the desktop app in this room. */
 const joinLink = (serverBase, id) =>
-  `barwatch://join?server=${encodeURIComponent(serverBase)}&session=${encodeURIComponent(id)}`;
+  `barwatch://join?server=${encodeURIComponent(serverBase)}&room=${encodeURIComponent(id)}`;
 
-/** Follows a session: calls `onChange(session)` now and after every change, until
- *  `alive()` turns false. `url` is the session's API address. */
+/** Follows a room: calls `onChange(room)` now and after every change, until
+ *  `alive()` turns false. `url` is the room's API address. */
 async function follow(url, alive, onChange, onGone) {
   let rev = null;
   while (alive()) {
@@ -110,7 +121,7 @@ async function follow(url, alive, onChange, onGone) {
       onChange(s);
     } catch (e) {
       if (!alive()) return;
-      if (/no such session/.test(e.message)) return onGone();
+      if (/no such room/.test(e.message)) return onGone();
       await new Promise((r) => setTimeout(r, 3000));
     }
   }

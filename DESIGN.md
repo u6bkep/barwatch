@@ -1,7 +1,7 @@
 # barwatch: design
 
 Two designs live here: the replay timeline (§1–§8, built and released in 0.3.0) and rooms
-(§9, designed 2026-11-22, not built).
+(§9, designed 2026-11-22; the daemon side, R1, built on branch `rooms`, §9.12).
 
 Status (2026-11-16): T1–T5 are built (each section's "as built" notes), on branch
 `timeline-prototype`; release preparation for 0.3.0 on `release-prep` (`CHANGELOG.md`).
@@ -597,7 +597,7 @@ Each ends with `cargo clippy --workspace --all-targets -- -D warnings` clean and
   still BAR's art shown in another program. If the BAR team objects, the glyph fallback
   is the answer.
 
-## 9. Rooms (designed 2026-11-22, not built)
+## 9. Rooms (designed 2026-11-22; R1 built, §9.12)
 
 ### 9.1 Why
 
@@ -680,7 +680,7 @@ digits of its bytes' SHA-256, which no game id can be.
 
 **Room** (`/data/rooms/<id>.json`). What is about people: id, name, `created_unix`,
 `last_used_unix`, the current replay's key (none in a new room), and the history: up to
-50 entries of key and when the room started it, newest first. In memory only, as now:
+50 entries of key and when the room picked it, newest first. In memory only, as now:
 phase, run, paused, speed, ended, jump, game port, viewers, who is in the game, the
 runner's channel.
 
@@ -802,3 +802,41 @@ Each ends clippy-clean with the workspace tests passing.
   friends (§9.2).
 - Two rooms running the same replay each run a server; nothing is shared but the file and
   the statistics.
+
+### 9.12 As built (R1, 2026-11-22)
+
+`state.rs` (`Room`, `Replay`, the cache), `http.rs` (the calls), `rooms_tests.rs` (the
+flows of §9.10), `stats_tests.rs` (the timeline, now through rooms). Choices the sections
+above did not dictate:
+- A room is stored by its own id (`rooms/<uid>.json`; run directory `run/<uid>`); the link
+  id is a field, so *New link* changes nothing else and a running server is untouched.
+  Log lines name rooms by that id, never by the link id (the capability).
+- History: newest first, without duplicates, at most 50; each entry is when the room
+  picked it. Picking the current replay again changes nothing. A `key` that is not in the
+  history is 400 (not 404, which means the room is gone); one whose file is gone and
+  cannot be fetched again is 409.
+- Picking while a run is on stops it and waits up to 15 s for the server to exit (409 if
+  it does not). Start waits for a pick in progress. A BAR link whose record already has
+  its file downloads nothing.
+- "Least recently used" is `last_used_unix` in the replay's `meta.json`, set when a room
+  picks it, leaves it for another and starts it. The cache is trimmed after every pick,
+  after a deleted room's server has stopped, at start, and every 5 s (a replay the
+  service confirmed becomes one it can let go).
+- A deleted room answers 404 at once; its replays are released (and records no other room
+  names deleted) once its server has stopped.
+- Engine names are given in joining order from the member's name (`names::unique`
+  against the replay's players and the names given so far). A member of a room without a
+  replay gets one unique among the members. A report's state shows only if its `replay`
+  equals the current replay's key (both absent counts as equal); else `preparing`.
+- The game id becoming confirmed wakes the views of every room naming the replay (they
+  show it, `match_url` and `available`).
+- `TimelineView.replay` names the replay; a room without one answers `rev` 0,
+  `unavailable`, "This room has no replay yet." A timeline long-poll also ends when the
+  room picks another replay.
+- `POST archive` refuses a replay without a game id (400) before asking the service;
+  errors of the service are 502, a refusal by it 400, no service 503.
+- The first start also deletes `/data/run` (named by party) along with `/data/sessions`.
+- A room whose current replay's file is missing at start (removed by hand) is `failed`
+  with a note; the cache never removes it.
+- The web page keeps *Copy link*, *New link* and *Delete* both on the list and in the
+  open room; picking works on the open room.

@@ -40,8 +40,9 @@ input[type=text]:focus, select:focus, button:focus-visible { outline: 2px solid 
 .badge.failed, .badge.error { color: var(--bad); border-color: var(--bad); }
 .badge.ready, .badge.playing { color: var(--good); border-color: var(--good); }
 .sessions { display: grid; gap: 10px; }
-.session-item { display: flex; gap: 14px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-align: left; width: 100%; }
+.session-item { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); text-align: left; width: 100%; }
 .session-item:hover { border-color: var(--accent); }
+.session-open { display: flex; gap: 14px; align-items: center; flex: 1; min-width: 0; background: none; border: none; padding: 0; color: inherit; text-align: left; cursor: pointer; }
 .thumb { width: 72px; height: 72px; border-radius: 6px; object-fit: cover; background: var(--bg); flex: none; }
 .mapimg { width: 260px; max-width: 100%; aspect-ratio: 1; border-radius: 8px; object-fit: cover; background: var(--bg); }
 .teams { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 8px; }

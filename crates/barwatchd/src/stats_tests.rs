@@ -31,7 +31,7 @@ pub(crate) fn hex_id(id: [u8; 16]) -> String {
 
 // -- fixtures ------------------------------------------------------------------
 
-const SETUP: &str = "[game]\n{\n[team0]\n{\nallyteam=0;\nteamleader=0;\nside=Armada;\nrgbcolor=0.1 0.2 0.9;\n}\n\
+pub(crate) const SETUP: &str = "[game]\n{\n[team0]\n{\nallyteam=0;\nteamleader=0;\nside=Armada;\nrgbcolor=0.1 0.2 0.9;\n}\n\
 [team1]\n{\nallyteam=1;\nside=Cortex;\n}\n[allyteam0]\n{\n}\n[allyteam1]\n{\n}\n\
 [player0]\n{\nteam=0;\nname=Alice;\nspectator=0;\n}\n[player1]\n{\nname=Watcher;\nspectator=1;\n}\n\
 [ai0]\n{\nteam=1;\nname=Bot1;\nshortname=BARb;\n}\n\

@@ -15,26 +15,33 @@
   <small>v{{VERSION}}</small>
 </header>
 <main>
+  <section class="card hidden" id="choose"></section>
+
   <section class="card hidden" id="detail"></section>
 
-  <section class="card" id="create">
-    <h2>New watch party</h2>
+  <section class="card hidden" id="pick">
+    <h2>Pick a replay for this room</h2>
     <div class="drop" id="drop" tabindex="0" role="button">Drop a replay (.sdfz) here, or click to choose one</div>
     <input type="file" id="file" accept=".sdfz" class="hidden">
     <form class="row" id="bar-form" style="margin-top:12px">
       <input type="text" id="bar-link" class="grow" placeholder="…or paste a replay link or id from the BAR website" autocomplete="off">
       <button type="submit">Fetch</button>
     </form>
+    <p class="muted">Picking a replay stops what the room is playing. Nothing starts until someone presses Start.</p>
   </section>
 
   <section class="card">
-    <h2>Watch parties</h2>
-    <div class="sessions" id="sessions"></div>
+    <h2>Rooms</h2>
+    <div class="sessions" id="rooms"></div>
+    <form class="row" id="new-room" style="margin-top:12px">
+      <input type="text" id="room-name" class="grow" placeholder="Name of a new room" maxlength="60" autocomplete="off">
+      <button type="submit" class="primary">New room</button>
+    </form>
   </section>
 
   <section class="card">
     <h2>Desktop apps</h2>
-    <p class="muted">Pairing lets the desktop app on this computer start watch parties from the replays in its own folder. Joining never needs it.</p>
+    <p class="muted">Pairing lets the desktop app on this computer make rooms and send the replays in its own folder to the archive. Joining a room never needs it.</p>
     <div class="row"><button id="pair">Pair the desktop app on this computer</button></div>
     <div class="viewers" id="tokens" style="margin-top:12px"></div>
   </section>
