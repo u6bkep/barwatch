@@ -3,7 +3,7 @@
 #   docker compose up -d
 #
 # Web page and API   http://<host>:8780   (HTTP/1 and h2c on the same port)
-# Game traffic       udp 8480-8489, one port per running watch party
+# Game traffic       udp 8480-8489, one port per running room
 #
 # The daemon has no login of its own. Put the web page behind a reverse proxy that
 # authenticates, and let the path prefix /app/ through without a login: the desktop
@@ -23,9 +23,11 @@ services:
       BARWATCH_UDP_PORTS: 8480-8489
       # Optional: a stats service (bar-replays) for the statistics timeline, reached
       # over this stack's network, and a `client` token of it, kept in a file (the
-      # secret below) rather than here. Without them parties have no timeline.
+      # secret below) rather than here. Without them rooms have no timeline.
       # BARWATCH_STATS_URL: http://bar-replays:8770/
       # BARWATCH_STATS_TOKEN_FILE: /run/secrets/stats_token
+      # Its public address, for the "View in Gex" links in the app and the web page.
+      # BARWATCH_STATS_PUBLIC_URL: https://bar-replays.example.org/
     # secrets: [stats_token]
     ports:
       - "8780:8780"

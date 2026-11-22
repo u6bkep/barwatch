@@ -1,17 +1,18 @@
 # barwatch
 
-Watch a [Beyond All Reason](https://www.beyondallreason.info/) replay together. A
-server hosts the replay; everyone who joins sees the same game, in sync, with shared
-pause, speed and jump-ahead. Viewers join from a link.
+Watch [Beyond All Reason](https://www.beyondallreason.info/) replays together. A
+server keeps rooms; everyone in a room watches the same replay, in sync, with shared
+pause, speed and jump-ahead, and the room moves on to the next replay together. You
+join a room once, from a link, and keep coming back to it.
 
 Two parts:
 
-- **`barwatchd`**, the server. It runs the engine's dedicated server on the replay
-  and serves a small web page. Runs in Docker.
-- **`barwatch`**, the desktop app for Linux and Windows. It opens from an invite
-  link, installs whatever the replay needs, and starts the game as a spectator.
+- **`barwatchd`**, the server. It keeps the rooms, runs the engine's dedicated server
+  on a room's replay and serves a small web page. Runs in Docker.
+- **`barwatch`**, the desktop app for Linux and Windows. It opens from a room's link,
+  installs whatever the room's replay needs, and starts the game as a spectator.
 
-## Joining a watch party
+## Joining a room
 
 1. Get the app.
    - **Windows:** download `barwatch-…-windows-x86_64.exe` from the
@@ -27,10 +28,22 @@ Two parts:
      ```
    - **Other Linux:** take `barwatch` from the release tarball and run it once; it
      registers the link handler for your user.
-2. Open the invite link you were sent and press **Join in barwatch**. The app asks
+2. Open the room's link you were sent and press **Join in barwatch**. The app asks
    before it joins.
 3. Wait for *Ready*. The replay starts for everyone when someone presses **Start**.
    If it is already running you are dropped straight in and caught up.
+
+The app remembers the rooms you have been in (the **Join** tab), so you get back in
+without the link.
+
+### In a room
+
+Everyone in a room can pick its replay: paste a replay link or id from the BAR website,
+or, in **My replays**, pick one of your own and press **Play in <room>**. Picking never
+starts it; the room shows who has everything for it, and someone presses **Start**.
+Picking another replay while one plays stops it for everyone. **Played here before**
+lists the room's earlier replays, to watch again. **View in Gex** opens a replay's
+statistics page on the replay archive (it needs a login there).
 
 The app uses Beyond All Reason's own data folder, so an engine, game version or map
 that BAR already downloaded is not downloaded again, and anything barwatch fetches is
@@ -50,33 +63,39 @@ from game chat, and the server's web page has buttons for the same things:
 | `!speed 2` | set the speed for everyone (0.3 to 20) |
 | `!help` | list these |
 
-Jumps only go forward: the engine cannot rewind. To go back, stop the party and start
+Jumps only go forward: the engine cannot rewind. To go back, stop the replay and start
 it again.
 
 ### The statistics timeline
 
 If the server has a stats service (below), the app shows the game's statistics beside
-the party: each side's economy, army value, damage, units built and lost, on one time
+the room: each side's economy, army value, damage, units built and lost, on one time
 axis, with markers for moments such as a first tech 2 factory, a commander killed or a
 nuke built. Your own game is the line across the charts; move the cursor to read any
-moment, and **Jump everyone to …** to move the party forward to it. What has not
+moment, and **Jump everyone to …** to move the room forward to it. What has not
 happened yet stays hidden unless you choose to show it. The numbers arrive while the
-service simulates the replay, usually well ahead of the party; marker pictures come from
+service simulates the replay, usually well ahead of the room; marker pictures come from
 your installed game.
 
 The app learns where your game is from a small widget it puts only into the games it
 starts. Without a stats service on the server there is no timeline and nothing else
 changes.
 
-## Starting a watch party
+## Making a room
 
-On the server's web page: drop a `.sdfz` replay onto it, or paste a replay link or id
-from the BAR website. Then send the invite link it shows.
+Rooms are permanent: make one for a group of friends and keep using its link. Making,
+deleting and re-linking rooms needs a login (the server's web page) or a paired app.
+
+On the server's web page: **New room**, then pick its replay (drop a `.sdfz` onto it, or
+paste a replay link or id) and send the room's link. **New link** replaces a room's
+link, for one that travelled further than meant; **Delete** removes the room (its
+replays stay in the archive).
 
 From the desktop app: pair it with the server once (on the web page, press *Pair the
 desktop app on this computer*). After that, **My replays** lists the replays in your
-BAR folder with their map, players and length; pick one and press **Watch together**.
-The replay is uploaded, the invite link is copied to the clipboard, and the app joins.
+BAR folder with their map, players and length; pick one and press **Watch together**,
+then choose one of the server's rooms or make a new one. **Archive** sends a replay to
+the replay archive without watching it.
 
 ## Running the server
 
@@ -88,40 +107,45 @@ docker compose up -d
 | what | default | setting |
 |---|---|---|
 | web page and API, HTTP/1 and h2c on one port | `0.0.0.0:8780` | `BARWATCH_LISTEN` |
-| game traffic, one UDP port per running party | `8480-8489` | `BARWATCH_UDP_PORTS` |
+| game traffic, one UDP port per running room | `8480-8489` | `BARWATCH_UDP_PORTS` |
 | address game clients connect to | host of the page's URL | `BARWATCH_GAME_HOST` |
 | replays, engines, state | `/data` | `BARWATCH_DATA` |
 | largest replay accepted | 256 MiB | `BARWATCH_MAX_UPLOAD_MB` |
-| parties are deleted after | 14 days | `BARWATCH_SESSION_DAYS` |
+| replay files kept that the stats service can send again | 4096 MiB | `BARWATCH_REPLAY_CACHE_MB` |
 | stats service for the statistics timeline (bar-replays), optional | none | `BARWATCH_STATS_URL` |
 | its `client` token, or a file holding it (e.g. a Docker secret) | none | `BARWATCH_STATS_TOKEN`, `BARWATCH_STATS_TOKEN_FILE` |
+| its public address, for **View in Gex** links | none | `BARWATCH_STATS_PUBLIC_URL` |
 
 **The daemon has no login of its own.** The intended setup:
 
 - Put the web page behind a reverse proxy that authenticates. The proxy may speak
   HTTP/1 or h2c to the daemon.
 - Let the path prefix **`/app/`** through without a login. The desktop app and the
-  public join page live there. A party's id (22 random characters) is what lets
-  someone see, join and control that party; creating parties through `/app/` needs
-  the token handed out by pairing.
+  public join page live there. A room's id (22 random characters, in its link) is what
+  lets someone see, join and use that room, including picking its replays; making,
+  deleting and re-linking rooms through `/app/` needs the token handed out by pairing.
 - Forward the UDP port range from the internet to the host unchanged. Game clients
   connect to those ports directly; they do not pass through the proxy.
 
-Anyone who learns a running party's UDP port can connect to it as a spectator: the
+Anyone who learns a running room's UDP port can connect to it as a spectator: the
 engine has no access control when it hosts a replay.
 
 **The stats service is optional.** It is
-[bar-replays](https://github.com/u6bkep/bar-replays), which simulates each party's replay
+[bar-replays](https://github.com/u6bkep/bar-replays), which simulates each room's replay
 and streams the statistics; run it in the same compose stack and point
 `BARWATCH_STATS_URL` at it over the stack's network (`http://bar-replays:8770/`), with a
 token of role `client` minted there (`bar-replays token add --name barwatch --role client`).
 With it, replays given by link or id come through its archive and uploads are handed to
-it. If it is slow or down, parties go on and the timeline says so. Without it: no
-timeline, everything else as before.
+it, so it is the replay archive: the server keeps replay files only as a cache (up to
+`BARWATCH_REPLAY_CACHE_MB`) and fetches one again when a room picks it from its
+history. Set `BARWATCH_STATS_PUBLIC_URL` to the service's public address for **View in
+Gex** links. If it is slow or down, rooms go on and the timeline says so. Without it: no
+timeline, and the server keeps the files of each room's current replay and the last 10
+it played; older ones are listed but must be picked again from the file or a link.
 
 The server needs no game content. For each replay it downloads the matching engine
 release once (about 35 MB) and runs its dedicated server, which only streams the
-recording: around 30 MB of memory and next to no CPU per running party.
+recording: around 30 MB of memory and next to no CPU per running room.
 
 ## How it works
 
@@ -133,8 +157,8 @@ recording: around 30 MB of memory and next to no CPU per running party.
   localhost): it learns who connected, reads chat for `!` commands, and sends
   `/skip`, `/pause` and speed changes.
 - The recording begins with the original lobby wait; the daemon skips it.
-- The app registers with the party over HTTP, reports its progress, and long-polls
-  for changes. When the party runs, it writes a four-line script and starts the
+- The app registers with the room over HTTP, reports its progress, and long-polls
+  for changes. When the room runs, it writes a four-line script and starts the
   engine: `spring --write-dir <BAR data> --isolation <script>`.
 
 `crates/barwatch-core` holds what both sides share (replay parsing, start scripts,
@@ -171,7 +195,7 @@ simulation would (its flags, including ways to misbehave, are in
 `crates/barwatchd/examples/fake_stats/main.rs`); point `BARWATCH_STATS_URL` at it
 with `BARWATCH_STATS_TOKEN=fake-token`.
 
-`join --headless` runs the session client without a window and the engine without
+`join --headless` runs the room client without a window and the engine without
 graphics, which is how the sync tests were done. Point `--data-dir` at a scratch
 folder that links `pool`, `packages`, `maps` and `rapid` from a real BAR folder.
 

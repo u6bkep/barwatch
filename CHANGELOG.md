@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0
+
+### Rooms
+
+- Watch parties are replaced by **rooms**. A room is a permanent place with a name and a
+  link: join it once, and it watches one replay after another together. Rooms are made,
+  deleted and given a new link on the server's web page or from a paired app.
+- Everyone in a room can pick its replay (a link or id from the BAR website, a file from
+  **My replays** with **Play in <room>**, or one from **Played here before**), start and
+  stop it, and pause, change speed or jump as before. Picking never starts a replay: the
+  room shows who has everything for it, and someone presses **Start**.
+- **Played here before** lists a room's earlier replays to watch again.
+- **View in Gex** opens a replay's page on the replay archive (bar-replays), for the
+  current replay and every earlier one. The server needs `BARWATCH_STATS_PUBLIC_URL`.
+- **Archive** in **My replays** (paired apps) sends a replay to the replay archive without
+  watching it.
+- The app's **Join** tab lists the rooms you have been in.
+
+### Server
+
+- With a stats service, the replay archive is bar-replays: the server keeps replay files
+  only as a cache, `BARWATCH_REPLAY_CACHE_MB` (default 4096), and fetches one again when
+  a room picks it. Without one, it keeps each room's current replay and the last 10 it
+  played.
+- `BARWATCH_SESSION_DAYS` is gone: rooms stay until deleted.
+
+### Compatibility
+
+- **The app and server must both be 0.4.** The protocol changed (version 2); an 0.3 app
+  refuses an 0.4 server and the other way round. Watch parties of an 0.3 server are
+  deleted when an 0.4 server first starts, and their invite links stop working.
+
 ## 0.3.0
 
 ### Statistics timeline

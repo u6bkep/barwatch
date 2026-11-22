@@ -1,7 +1,7 @@
 # barwatch: design
 
 Two designs live here: the replay timeline (§1–§8, built and released in 0.3.0) and rooms
-(§9, designed 2026-11-22; the daemon side, R1, built on branch `rooms`, §9.12).
+(§9, designed and built 2026-11-22, released in 0.4.0; as built: §9.12, §9.13).
 
 Status (2026-11-16): T1–T5 are built (each section's "as built" notes), on branch
 `timeline-prototype`; release preparation for 0.3.0 on `release-prep` (`CHANGELOG.md`).
@@ -597,7 +597,7 @@ Each ends with `cargo clippy --workspace --all-targets -- -D warnings` clean and
   still BAR's art shown in another program. If the BAR team objects, the glyph fallback
   is the answer.
 
-## 9. Rooms (designed 2026-11-22; R1 built, §9.12; R2 built, §9.13)
+## 9. Rooms (designed and built 2026-11-22, released in 0.4.0)
 
 ### 9.1 Why
 
