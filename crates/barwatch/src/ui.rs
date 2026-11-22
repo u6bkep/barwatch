@@ -1060,7 +1060,7 @@ impl Ui {
                 }
             }
             None => {
-                sections.push(room_header(view, &room.server, room.over));
+                sections.push(room_header(view, &room.server, room.over, update.stage == Stage::Gone));
                 sections.push(self.current_replay(view, update));
                 // An empty room's card says it all.
                 if update.stage != Stage::NoReplay || room.over {
@@ -1216,7 +1216,9 @@ impl Ui {
             state,
         ];
         items.extend(room_actions(update, over));
-        items.push(button("Copy link").key("room:copy").secondary());
+        if update.stage != Stage::Gone {
+            items.push(button("Copy link").key("room:copy").secondary());
+        }
         items.push(button(if over { "Close" } else { "Leave" }).key("room:leave").ghost());
         row(items).gap(tokens::SPACE_3).align(Align::Center)
     }
@@ -1482,17 +1484,17 @@ impl Ui {
     }
 }
 
-/// The room's name, where it is, and its link.
-fn room_header(view: &RoomView, server: &Url, over: bool) -> El {
-    row([
-        column([h2(view.name.clone()).ellipsis(), text(format!("A room on {}", host_of(server))).caption().muted()])
+/// The room's name, where it is, and its link (none once it is gone: the link is dead).
+fn room_header(view: &RoomView, server: &Url, over: bool, gone: bool) -> El {
+    let mut items =
+        vec![column([h2(view.name.clone()).ellipsis(), text(format!("A room on {}", host_of(server))).caption().muted()])
             .gap(2.0)
-            .width(Size::Fill(1.0)),
-        button("Copy link").key("room:copy").secondary(),
-        button(if over { "Close" } else { "Leave" }).key("room:leave").ghost(),
-    ])
-    .gap(tokens::SPACE_2)
-    .align(Align::Center)
+            .width(Size::Fill(1.0))];
+    if !gone {
+        items.push(button("Copy link").key("room:copy").secondary());
+    }
+    items.push(button(if over { "Close" } else { "Leave" }).key("room:leave").ghost());
+    row(items).gap(tokens::SPACE_2).align(Align::Center)
 }
 
 /// What can be done with the room's replay from here: start or stop it for
